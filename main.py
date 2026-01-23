@@ -147,10 +147,14 @@ logger = logging.getLogger(__name__)
 
 # ============ 配置 ============
 CONFIG = {
+    # 饿了么连锁商家后台 chain_id（从 URL 中获取：melody.shop.ele.me/app/chain/{chain_id}/...）
+    "chain_id": "99760038",
+    # 商家后台基础 URL
+    "base_url": "https://melody.shop.ele.me",
     "stores": [
         {
             "name": "测试门店",
-            "shop_id": "1303549223",
+            "shop_id": "1303549223",  # 如果有多个门店可以在这里配置
             "webhook": ""  # 企业微信机器人webhook地址，留空则不发送
         }
     ],
@@ -158,7 +162,7 @@ CONFIG = {
     "browser": {
         # 远程调试端口（Chromium/Chrome）
         "debug_port": 9222,
-        # 固定用户数据目录（用于“登录一次永久复用登录态”）
+        # 固定用户数据目录（用于"登录一次永久复用登录态"）
         # 默认放在项目目录下：taobao_flashsale_monitor/chromium_profile
         "user_data_dir": os.path.join(os.path.dirname(os.path.abspath(__file__)), "chromium_profile"),
         # 浏览器可执行文件路径（可选；留空自动寻找 Chromium/Chrome/Edge）
@@ -407,9 +411,11 @@ def main():
     print("   如需只跑一次后退出：加参数 --once")
     print("=" * 60 + "\n")
     
-    # 初始化 Selenium 抓取器：使用固定 profile 目录来“登录一次永久复用”
+    # 初始化 Selenium 抓取器：使用固定 profile 目录来"登录一次永久复用"
     fetcher = SeleniumGoodsFetcher(
         shop_id=CONFIG["stores"][0]["shop_id"],
+        chain_id=CONFIG["chain_id"],
+        base_url=CONFIG["base_url"],
         headless=False,
         debug_port=args.debug_port,
         user_data_dir=args.profile_dir,
@@ -417,10 +423,10 @@ def main():
         auto_launch_browser=(not args.no_open_browser),
     )
     
-    # 启动时先拉起浏览器（更符合“运行脚本后自动打开 chromium”）
+    # 启动时先拉起浏览器（更符合"运行脚本后自动打开 chromium"）
     if not args.no_open_browser:
-        first_shop_id = CONFIG["stores"][0]["shop_id"]
-        open_url = f"https://napos-goods-pc.faas.ele.me/single/goods-manage?shopId={first_shop_id}"
+        # 饿了么连锁商家后台首页
+        open_url = f"{CONFIG['base_url']}/app/chain/{CONFIG['chain_id']}/shop#app.chainshop.shop"
         fetcher.ensure_debug_browser(open_url=open_url)
     
     try:

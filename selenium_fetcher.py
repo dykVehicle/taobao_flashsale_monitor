@@ -45,11 +45,13 @@ class GoodsItem:
 
 
 class SeleniumGoodsFetcher:
-    """使用Selenium抓取商品数据"""
+    """使用Selenium抓取商品数据 - 饿了么连锁商家后台"""
     
     def __init__(
         self,
         shop_id: str,
+        chain_id: str = "",
+        base_url: str = "https://melody.shop.ele.me",
         headless: bool = False,
         debug_port: int = 9222,
         user_data_dir: Optional[str] = None,
@@ -61,6 +63,8 @@ class SeleniumGoodsFetcher:
         
         Args:
             shop_id: 店铺ID
+            chain_id: 连锁店ID（饿了么连锁商家后台需要）
+            base_url: 商家后台基础URL
             headless: 是否无头模式（建议首次运行设为False以便登录）
             debug_port: Chromium/Chrome 远程调试端口（默认 9222）
             user_data_dir: Chromium/Chrome 用户数据目录（用于持久化登录态）
@@ -68,6 +72,8 @@ class SeleniumGoodsFetcher:
             auto_launch_browser: 无法连接调试端口时，是否自动启动浏览器
         """
         self.shop_id = shop_id
+        self.chain_id = chain_id
+        self.base_url = base_url.rstrip("/")
         self.headless = headless
         self.debug_port = int(debug_port)
         self.browser_path = browser_path
@@ -77,7 +83,7 @@ class SeleniumGoodsFetcher:
         if user_data_dir:
             self.user_data_dir = os.path.abspath(user_data_dir)
         else:
-            # 默认放在项目目录下，保证“登录一次，后续复用登录态”
+            # 默认放在项目目录下，保证"登录一次，后续复用登录态"
             self.user_data_dir = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)),
                 "chromium_profile",
@@ -230,6 +236,12 @@ class SeleniumGoodsFetcher:
                 "--no-first-run",
                 "--no-default-browser-check",
             ]
+            
+            # 如果是 root 用户，必须添加 --no-sandbox 参数
+            if os.geteuid() == 0:
+                cmd.append("--no-sandbox")
+                logger.warning("检测到以 root 用户运行，已添加 --no-sandbox 参数")
+            
             if open_url:
                 cmd.append(open_url)
             
@@ -268,8 +280,9 @@ class SeleniumGoodsFetcher:
         from selenium.webdriver.support import expected_conditions as EC
         
         try:
-            # 访问商品管理页面
-            goods_url = f"https://napos-goods-pc.faas.ele.me/single/goods-manage?shopId={self.shop_id}"
+            # 访问饿了么连锁商家后台 - 商品管理页面
+            # URL格式: https://melody.shop.ele.me/app/chain/{chain_id}/shop#app.chainshop.shop
+            goods_url = f"{self.base_url}/app/chain/{self.chain_id}/shop#app.chainshop.shop"
             logger.info(f"正在访问: {goods_url}")
             self.driver.get(goods_url)
             
@@ -328,17 +341,30 @@ class SeleniumGoodsFetcher:
         try:
             # 先用URL判断（比全文关键字更可靠）
             url = (self.driver.current_url or "").lower()
-            if any(k in url for k in ["login", "signin", "passport", "oauth", "auth", "account.taobao", "login.taobao"]):
+            login_url_keywords = [
+                "login", "signin", "passport", "oauth", "auth",
+                "account.taobao", "login.taobao", "login.ele.me",
+                "account.ele.me", "uac.ele.me"
+            ]
+            if any(k in url for k in login_url_keywords):
                 return True
 
             # 检查是否有登录相关元素
             page_source = self.driver.page_source
-            # 注意：不要用“登录”这个过于泛化的关键词，容易误判
-            login_indicators = ["请登录", "扫码登录", "login", "signin", "account.taobao", "login.taobao"]
+            # 饿了么商家后台登录相关的关键词
+            login_indicators = [
+                "请登录", "扫码登录", "login", "signin",
+                "account.taobao", "login.taobao",
+                "请使用手机号登录", "获取验证码", "密码登录"
+            ]
             
+            # 页面内包含登录关键词，且不是已经登录的状态
             for indicator in login_indicators:
-                if indicator in page_source and "商品管理" not in page_source:
-                    return True
+                if indicator in page_source:
+                    # 已登录的页面通常包含这些元素
+                    logged_in_indicators = ["商品管理", "门店管理", "订单", "我的店铺", "退出登录"]
+                    if not any(li in page_source for li in logged_in_indicators):
+                        return True
             
             return False
         except:
