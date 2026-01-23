@@ -23,8 +23,57 @@ import json
 import subprocess
 import time
 
+def _run_silent(cmd, allow_fail=False):
+    """静默运行命令"""
+    try:
+        subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        if not allow_fail:
+            return False
+        return False
+
+def _ensure_pip():
+    """确保 pip 已安装"""
+    # 检查 pip 是否可用
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "--version"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    if result.returncode == 0:
+        return True
+    
+    # pip 不存在，尝试安装
+    print("正在配置 pip...")
+    
+    # 方法1: 使用 ensurepip（Python 内置）
+    if _run_silent([sys.executable, "-m", "ensurepip", "--upgrade"], allow_fail=True):
+        return True
+    
+    # 方法2: 使用 apt 安装（Debian/Ubuntu）
+    if os.path.exists("/usr/bin/apt"):
+        if _run_silent(["sudo", "apt", "update", "-qq"], allow_fail=True):
+            if _run_silent(["sudo", "apt", "install", "-y", "-qq", "python3-pip"], allow_fail=True):
+                return True
+    
+    # 方法3: 使用 get-pip.py
+    try:
+        import urllib.request
+        import tempfile
+        get_pip_url = "https://bootstrap.pypa.io/get-pip.py"
+        with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as f:
+            urllib.request.urlretrieve(get_pip_url, f.name)
+            if _run_silent([sys.executable, f.name, "--quiet"], allow_fail=True):
+                os.unlink(f.name)
+                return True
+            os.unlink(f.name)
+    except Exception:
+        pass
+    
+    return False
+
 def ensure_dependencies():
-    """自动检查并安装所有依赖（无感知安装）"""
+    """自动检查并安装所有依赖（无感知安装）- 包括 pip"""
     required_packages = {
         'requests': 'requests',
         'bs4': 'beautifulsoup4',
@@ -34,6 +83,7 @@ def ensure_dependencies():
         'selenium': 'selenium',
     }
     
+    # 检查缺失的包
     missing = []
     for import_name, package_name in required_packages.items():
         try:
@@ -41,29 +91,43 @@ def ensure_dependencies():
         except ImportError:
             missing.append(package_name)
     
-    if missing:
-        print(f"检测到依赖缺失: {', '.join(missing)}，正在自动安装...")
-        try:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "-q"] + missing,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            print("✓ 依赖安装成功！")
-        except subprocess.CalledProcessError:
-            # 静默安装失败，尝试使用 requirements.txt
-            req_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt")
-            if os.path.exists(req_path):
-                try:
-                    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-r", req_path])
-                    print("✓ 依赖安装成功！")
-                except subprocess.CalledProcessError as e:
-                    print(f"✗ 依赖安装失败: {e}")
-                    print(f"  请手动运行: pip install -r {req_path}")
-                    sys.exit(1)
-            else:
-                print(f"✗ 依赖安装失败，请手动安装: pip install {' '.join(missing)}")
+    if not missing:
+        return  # 所有依赖已安装，静默返回
+    
+    # 确保 pip 可用
+    if not _ensure_pip():
+        print("✗ 无法安装 pip，请手动安装后重试")
+        print("  Ubuntu/Debian: sudo apt install python3-pip")
+        print("  其他系统: https://pip.pypa.io/en/stable/installation/")
+        sys.exit(1)
+    
+    # 安装缺失的 Python 包
+    print(f"正在配置依赖: {', '.join(missing)}...")
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check"] + missing,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        print("✓ 依赖配置完成！")
+    except subprocess.CalledProcessError:
+        # 静默安装失败，尝试使用 requirements.txt
+        req_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt")
+        if os.path.exists(req_path):
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check", "-r", req_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                print("✓ 依赖配置完成！")
+            except subprocess.CalledProcessError as e:
+                print(f"✗ 依赖安装失败: {e}")
+                print(f"  请手动运行: pip install -r {req_path}")
                 sys.exit(1)
+        else:
+            print(f"✗ 依赖安装失败，请手动安装: pip install {' '.join(missing)}")
+            sys.exit(1)
 
 ensure_dependencies()
 
