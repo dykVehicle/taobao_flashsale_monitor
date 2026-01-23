@@ -145,80 +145,143 @@ class SeleniumGoodsFetcher:
         candidates = []
         
         if system == "Windows":
+            # 获取环境变量路径
+            local_app_data = os.environ.get('LOCALAPPDATA', '')
+            program_files = os.environ.get('PROGRAMFILES', r'C:\Program Files')
+            program_files_x86 = os.environ.get('PROGRAMFILES(X86)', r'C:\Program Files (x86)')
+            user_profile = os.environ.get('USERPROFILE', '')
+            
             candidates.extend([
-                # Chromium (常见路径)
-                r"C:\Program Files\Chromium\Application\chrome.exe",
-                r"C:\Program Files (x86)\Chromium\Application\chrome.exe",
-                os.path.expandvars(r"%LOCALAPPDATA%\Chromium\Application\chrome.exe"),
-                # Google Chrome
-                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-                os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-                # Microsoft Edge（Chromium内核）
+                # Microsoft Edge（Windows 10/11 自带，最可能存在）
+                os.path.join(program_files, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+                os.path.join(program_files_x86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
                 r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
                 r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                # Google Chrome
+                os.path.join(program_files, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+                os.path.join(program_files_x86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
             ])
+            
+            # 用户目录下的浏览器
+            if local_app_data:
+                candidates.extend([
+                    os.path.join(local_app_data, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+                    os.path.join(local_app_data, 'Chromium', 'Application', 'chrome.exe'),
+                    os.path.join(local_app_data, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+                ])
+            
+            # Chromium
+            candidates.extend([
+                os.path.join(program_files, 'Chromium', 'Application', 'chrome.exe'),
+                os.path.join(program_files_x86, 'Chromium', 'Application', 'chrome.exe'),
+                r"C:\Program Files\Chromium\Application\chrome.exe",
+                r"C:\Program Files (x86)\Chromium\Application\chrome.exe",
+            ])
+            
         elif system == "Darwin":  # macOS
             candidates.extend([
-                "/Applications/Chromium.app/Contents/MacOS/Chromium",
                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
                 "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
             ])
         else:  # Linux
             candidates.extend([
+                "/usr/bin/google-chrome",
+                "/usr/bin/google-chrome-stable",
                 "/usr/bin/chromium-browser",
                 "/usr/bin/chromium",
-                "/usr/bin/google-chrome",
                 "/usr/bin/microsoft-edge",
+                "/snap/bin/chromium",
             ])
         
         for p in candidates:
             if p and os.path.exists(p):
+                logger.info(f"找到浏览器: {p}")
                 return p
+        
+        # 打印调试信息
+        logger.warning("未找到浏览器，已检查以下路径:")
+        for p in candidates[:10]:  # 只打印前10个
+            logger.warning(f"  - {p} (存在: {os.path.exists(p) if p else False})")
         
         return ""
         
+    def _is_edge_browser(self) -> bool:
+        """检测当前使用的是否是Edge浏览器"""
+        browser_exe = self._find_browser_executable()
+        if browser_exe:
+            return 'edge' in browser_exe.lower() or 'msedge' in browser_exe.lower()
+        return False
+    
     def _init_driver(self):
-        """连接到已运行的Chrome浏览器（远程调试模式），如果未运行则尝试启动"""
+        """连接到已运行的浏览器（远程调试模式），如果未运行则尝试启动"""
         try:
             from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
             
-            options = Options()
-            # 连接到已运行的Chrome浏览器（调试端口9222）
-            options.add_experimental_option("debuggerAddress", f"127.0.0.1:{self.debug_port}")
+            is_edge = self._is_edge_browser()
+            logger.info(f"检测到浏览器类型: {'Edge' if is_edge else 'Chrome/Chromium'}")
             
-            try:
-                self.driver = webdriver.Chrome(options=options)
-                self.driver.implicitly_wait(10)
-                logger.info("成功连接到浏览器（远程调试）")
-            except Exception:
-                logger.info("未能连接到现有浏览器实例，尝试自动启动 Chromium/Chrome...")
-                if self.ensure_debug_browser():
-                    # 启动后再次尝试连接
-                    self._wait_for_debug_port(timeout=20)
+            if is_edge:
+                # 使用Edge
+                from selenium.webdriver.edge.options import Options
+                options = Options()
+                options.add_experimental_option("debuggerAddress", f"127.0.0.1:{self.debug_port}")
+                
+                try:
+                    self.driver = webdriver.Edge(options=options)
+                    self.driver.implicitly_wait(10)
+                    logger.info("成功连接到Edge浏览器（远程调试）")
+                except Exception as e:
+                    logger.info(f"未能连接到现有Edge实例: {e}")
+                    logger.info("尝试自动启动Edge...")
+                    if self.ensure_debug_browser():
+                        self._wait_for_debug_port(timeout=20)
+                        self.driver = webdriver.Edge(options=options)
+                        self.driver.implicitly_wait(10)
+                        logger.info("成功启动并连接到Edge浏览器（远程调试）")
+                    else:
+                        raise Exception("无法自动启动Edge浏览器")
+            else:
+                # 使用Chrome/Chromium
+                from selenium.webdriver.chrome.options import Options
+                options = Options()
+                options.add_experimental_option("debuggerAddress", f"127.0.0.1:{self.debug_port}")
+                
+                try:
                     self.driver = webdriver.Chrome(options=options)
                     self.driver.implicitly_wait(10)
-                    logger.info("成功启动并连接到浏览器（远程调试）")
-                else:
-                    raise Exception("无法自动启动浏览器，请手动启动远程调试浏览器")
+                    logger.info("成功连接到Chrome浏览器（远程调试）")
+                except Exception as e:
+                    logger.info(f"未能连接到现有Chrome实例: {e}")
+                    logger.info("尝试自动启动Chrome...")
+                    if self.ensure_debug_browser():
+                        self._wait_for_debug_port(timeout=20)
+                        self.driver = webdriver.Chrome(options=options)
+                        self.driver.implicitly_wait(10)
+                        logger.info("成功启动并连接到Chrome浏览器（远程调试）")
+                    else:
+                        raise Exception("无法自动启动Chrome浏览器")
             
         except Exception as e:
-            logger.error(f"连接Chrome浏览器失败: {e}")
+            logger.error(f"连接浏览器失败: {e}")
             logger.error("请尝试手动运行以下命令启动浏览器（远程调试模式）:")
+            browser_exe = self._find_browser_executable()
             if os.name == 'nt':  # Windows
                 logger.error(
-                    f'chrome.exe --remote-debugging-port={self.debug_port} --user-data-dir="{self.user_data_dir}"'
+                    f'"{browser_exe}" --remote-debugging-port={self.debug_port} --user-data-dir="{self.user_data_dir}"'
                 )
             else:
                 logger.error(
-                    f"google-chrome --remote-debugging-port={self.debug_port} --user-data-dir={self.user_data_dir}"
+                    f'"{browser_exe}" --remote-debugging-port={self.debug_port} --user-data-dir="{self.user_data_dir}"'
                 )
             raise
 
     def _launch_chrome_debug(self, open_url: Optional[str] = None) -> bool:
         """尝试启动浏览器调试模式（Chromium/Chrome/Edge）"""
         import subprocess
+        import platform
         
         browser_exe = self._find_browser_executable()
         if not browser_exe:
@@ -228,6 +291,7 @@ class SeleniumGoodsFetcher:
         try:
             # 创建用户数据目录
             os.makedirs(self.user_data_dir, exist_ok=True)
+            logger.info(f"用户数据目录: {self.user_data_dir}")
                 
             cmd = [
                 browser_exe,
@@ -237,19 +301,48 @@ class SeleniumGoodsFetcher:
                 "--no-default-browser-check",
             ]
             
-            # 如果是 root 用户，必须添加 --no-sandbox 参数
-            if os.geteuid() == 0:
-                cmd.append("--no-sandbox")
-                logger.warning("检测到以 root 用户运行，已添加 --no-sandbox 参数")
+            # 如果是 root 用户（仅Linux），必须添加 --no-sandbox 参数
+            if platform.system() != "Windows":
+                try:
+                    if os.geteuid() == 0:
+                        cmd.append("--no-sandbox")
+                        logger.warning("检测到以 root 用户运行，已添加 --no-sandbox 参数")
+                except AttributeError:
+                    pass  # Windows没有geteuid
             
             if open_url:
                 cmd.append(open_url)
             
-            logger.info(f"正在启动浏览器: {' '.join(cmd)}")
-            subprocess.Popen(cmd)
-            return self._wait_for_debug_port(timeout=20)
+            logger.info(f"正在启动浏览器: {browser_exe}")
+            logger.info(f"启动命令: {' '.join(cmd)}")
+            
+            # Windows下使用不同的启动方式
+            if platform.system() == "Windows":
+                # 使用 shell=False 并设置 creationflags 避免显示命令行窗口
+                CREATE_NO_WINDOW = 0x08000000
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=CREATE_NO_WINDOW
+                )
+                logger.info(f"浏览器进程已启动，PID: {process.pid}")
+            else:
+                subprocess.Popen(cmd)
+            
+            # 等待端口可用
+            logger.info(f"等待端口 {self.debug_port} 可用...")
+            if self._wait_for_debug_port(timeout=30):
+                logger.info("浏览器启动成功！")
+                return True
+            else:
+                logger.error(f"等待端口 {self.debug_port} 超时")
+                return False
+                
         except Exception as e:
             logger.error(f"启动浏览器失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
 
     

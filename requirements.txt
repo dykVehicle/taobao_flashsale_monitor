@@ -1,6 +1,14 @@
+# 核心依赖
 requests>=2.28.0
 beautifulsoup4>=4.11.0
 lxml>=4.9.0
 openpyxl>=3.0.10
 schedule>=1.1.0
 selenium>=4.8.0
+
+# GUI依赖
+PyQt6>=6.4.0
+cryptography>=3.4.0
+
+# 打包依赖（仅打包时需要）
+# pyinstaller>=5.0

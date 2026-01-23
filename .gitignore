@@ -27,3 +27,11 @@ debug_*.png
 .DS_Store
 Thumbs.db
 chromium_profile/
+
+# PyInstaller
+build/
+*.spec
+# dist/ 目录保留，用于存放编译产物
+
+# Cookies
+cookies_*.pkl

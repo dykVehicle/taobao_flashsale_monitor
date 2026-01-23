@@ -1,0 +1,108 @@
+#!/bin/bash
+# 从WSL环境调用Windows Python进行编译
+# 用法: bash build_from_wsl.sh
+
+echo "======================================"
+echo " 淘宝闪购监控工具 - 从WSL编译Windows exe"
+echo "======================================"
+echo ""
+
+# 获取当前目录
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# 获取Windows用户名
+WIN_USER=$(cmd.exe /c "echo %USERNAME%" 2>/dev/null | tr -d '\r\n')
+if [ -z "$WIN_USER" ]; then
+    WIN_USER="Default"
+fi
+
+# Windows临时编译目录
+WIN_BUILD_DIR="/mnt/c/Users/$WIN_USER/Desktop/taobao_monitor_build"
+WIN_BUILD_PATH="C:\\Users\\$WIN_USER\\Desktop\\taobao_monitor_build"
+
+echo "WSL项目目录: $SCRIPT_DIR"
+echo "Windows编译目录: $WIN_BUILD_PATH"
+echo ""
+
+# 检查Windows Python
+echo "[1/5] 检查Windows Python..."
+WIN_PYTHON_VERSION=$(cmd.exe /c "python --version" 2>&1 | tr -d '\r')
+if [[ ! "$WIN_PYTHON_VERSION" =~ "Python" ]]; then
+    echo "错误: 未找到Windows Python，请先安装Python"
+    echo "下载地址: https://www.python.org/downloads/"
+    exit 1
+fi
+echo "  ✓ 找到 $WIN_PYTHON_VERSION"
+
+# 复制文件到Windows目录
+echo ""
+echo "[2/5] 复制项目文件到Windows..."
+rm -rf "$WIN_BUILD_DIR" 2>/dev/null
+mkdir -p "$WIN_BUILD_DIR"
+
+# 复制必要文件
+cp "$SCRIPT_DIR/gui_app.py" "$WIN_BUILD_DIR/"
+cp "$SCRIPT_DIR/config_manager.py" "$WIN_BUILD_DIR/"
+cp "$SCRIPT_DIR/selenium_fetcher.py" "$WIN_BUILD_DIR/"
+cp "$SCRIPT_DIR/build_exe.py" "$WIN_BUILD_DIR/"
+cp "$SCRIPT_DIR/requirements.txt" "$WIN_BUILD_DIR/"
+cp "$SCRIPT_DIR/version.json" "$WIN_BUILD_DIR/" 2>/dev/null || echo '{"version": "1.0"}' > "$WIN_BUILD_DIR/version.json"
+echo "  ✓ 文件复制完成"
+
+# 安装依赖
+echo ""
+echo "[3/5] 安装Python依赖..."
+cmd.exe /c "pip install -q PyQt6 cryptography selenium openpyxl requests beautifulsoup4 lxml pyinstaller" 2>/dev/null
+echo "  ✓ 依赖安装完成"
+
+# 切换到项目目录并打包
+echo ""
+echo "[4/5] 开始打包..."
+echo "  这可能需要2-5分钟，请耐心等待..."
+echo ""
+
+cmd.exe /c "cd /d $WIN_BUILD_PATH && python build_exe.py"
+
+# 检查结果并复制回来
+echo ""
+echo "[5/5] 检查打包结果..."
+
+# 查找生成的exe文件（支持版本号）
+EXE_FILE=$(find "$WIN_BUILD_DIR/dist" -name "TaobaoFlashSaleMonitor*.exe" -type f 2>/dev/null | head -1)
+if [ -n "$EXE_FILE" ] && [ -f "$EXE_FILE" ]; then
+    EXE_NAME=$(basename "$EXE_FILE")
+    
+    # 复制exe回原目录
+    mkdir -p "$SCRIPT_DIR/dist"
+    cp "$EXE_FILE" "$SCRIPT_DIR/dist/"
+    
+    # 同时复制version.json
+    if [ -f "$WIN_BUILD_DIR/version.json" ]; then
+        cp "$WIN_BUILD_DIR/version.json" "$SCRIPT_DIR/"
+    fi
+    
+    echo ""
+    echo "======================================"
+    echo "[SUCCESS] Build completed!"
+    echo "======================================"
+    echo ""
+    echo "EXE file: $EXE_NAME"
+    echo "Location:"
+    echo "  Desktop: $WIN_BUILD_PATH\\dist\\$EXE_NAME"
+    echo "  Copied to: $SCRIPT_DIR/dist/$EXE_NAME"
+    echo ""
+    
+    # 显示文件大小
+    SIZE=$(ls -lh "$SCRIPT_DIR/dist/$EXE_NAME" | awk '{print $5}')
+    echo "File size: $SIZE"
+    echo ""
+    echo "You can double-click $EXE_NAME to run!"
+else
+    echo ""
+    echo "✗ 打包失败"
+    echo ""
+    echo "请尝试在Windows命令提示符中手动运行:"
+    echo "  1. 打开 CMD 或 PowerShell"
+    echo "  2. cd $WIN_BUILD_PATH"
+    echo "  3. python build_exe.py"
+fi
