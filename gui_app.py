@@ -65,8 +65,10 @@ class MonitorWorker(QThread):
         self.auto_fill_login = auto_fill_login
         self.running = True
         self.fetcher = None
+        self._is_cleaning_up = False
     
     def log(self, msg: str):
+        if not self.running: return
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_signal.emit(f"[{timestamp}] {msg}")
     
@@ -74,6 +76,7 @@ class MonitorWorker(QThread):
         try:
             from selenium_fetcher import SeleniumGoodsFetcher
             
+            if not self.running: return
             self.log("正在初始化浏览器...")
             self.status_signal.emit("初始化中...")
             self.progress_signal.emit(10)
@@ -90,6 +93,8 @@ class MonitorWorker(QThread):
                 auto_launch_browser=True,
             )
             
+            if not self.running: return
+            
             # 启动浏览器
             open_url = f"{self.config.base_url}/app/chain/{self.config.chain_id}/shop#app.chainshop.shop"
             self.log("正在查找浏览器...")
@@ -101,10 +106,6 @@ class MonitorWorker(QThread):
                 self.log(f"找到浏览器: {browser_path}")
             else:
                 self.log("未找到浏览器，请检查是否安装了Chrome/Edge")
-                self.log("常见浏览器位置:")
-                self.log("  - C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe")
-                self.log("  - C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe")
-                self.log("或在「高级设置」中手动指定浏览器路径")
                 self.error_signal.emit(
                     "无法找到浏览器！\n\n"
                     "请确保已安装以下浏览器之一：\n"
@@ -115,6 +116,7 @@ class MonitorWorker(QThread):
                 )
                 return
             
+            if not self.running: return
             self.log("正在启动浏览器...")
             if not self.fetcher.ensure_debug_browser(open_url=open_url):
                 self.error_signal.emit(
@@ -128,18 +130,24 @@ class MonitorWorker(QThread):
                 )
                 return
             
+            if not self.running: return
             self.log("浏览器已启动")
             self.progress_signal.emit(30)
             
             # 如果需要自动填充登录
             if self.auto_fill_login and self.config.taobao_username and self.config.taobao_password:
+                if not self.running: return
                 self.log("正在尝试自动登录...")
                 self._try_auto_login()
             
             # 开始抓取
+            if not self.running: return
             self.log("开始抓取商品数据...")
             self.status_signal.emit("抓取中...")
             self.progress_signal.emit(50)
+            
+            # 传递 running 标志给 fetcher（如果支持的话，需要修改 fetcher）
+            # 目前只能在耗时操作后检查
             
             goods_list = self.fetcher.login_and_fetch(
                 auto_login=False,
@@ -147,6 +155,7 @@ class MonitorWorker(QThread):
                 login_timeout=30 * 60,
             )
             
+            if not self.running: return
             self.progress_signal.emit(80)
             
             # 统计结果
@@ -159,24 +168,25 @@ class MonitorWorker(QThread):
                 "total": len(goods_list),
             }
             
-            self.log(f"抓取完成！已下架: {len(off_sale)} 个, 已售罄: {len(sold_out)} 个")
-            self.progress_signal.emit(100)
-            self.status_signal.emit("完成")
-            self.finished_signal.emit(result)
+            if self.running:
+                self.log(f"抓取完成！已下架: {len(off_sale)} 个, 已售罄: {len(sold_out)} 个")
+                self.progress_signal.emit(100)
+                self.status_signal.emit("完成")
+                self.finished_signal.emit(result)
             
         except Exception as e:
-            self.error_signal.emit(f"监控出错: {str(e)}")
-            import traceback
-            self.log(f"错误详情: {traceback.format_exc()}")
+            if self.running:
+                self.error_signal.emit(f"监控出错: {str(e)}")
+                import traceback
+                self.log(f"错误详情: {traceback.format_exc()}")
         finally:
-            if self.fetcher:
-                try:
-                    self.fetcher.close()
-                except:
-                    pass
+            # 如果是手动停止，清理工作由 force_stop 线程处理
+            if self.running:
+                self._cleanup()
     
     def _try_auto_login(self):
         """尝试自动填充登录表单"""
+        if not self.running: return
         if not self.fetcher or not self.fetcher.driver:
             self.fetcher._init_driver()
         
@@ -190,6 +200,7 @@ class MonitorWorker(QThread):
         
         try:
             time.sleep(3)
+            if not self.running: return
             
             # 检查是否在登录页面
             if not self.fetcher._need_login():
@@ -211,6 +222,7 @@ class MonitorWorker(QThread):
             
             username_input = None
             for selector in username_selectors:
+                if not self.running: return
                 try:
                     username_input = driver.find_element(By.CSS_SELECTOR, selector)
                     if username_input:
@@ -233,6 +245,7 @@ class MonitorWorker(QThread):
             
             password_input = None
             for selector in password_selectors:
+                if not self.running: return
                 try:
                     password_input = driver.find_element(By.CSS_SELECTOR, selector)
                     if password_input:
@@ -255,6 +268,7 @@ class MonitorWorker(QThread):
             ]
             
             for selector in login_button_selectors:
+                if not self.running: return
                 try:
                     login_btn = driver.find_element(By.CSS_SELECTOR, selector)
                     if login_btn:
@@ -268,12 +282,54 @@ class MonitorWorker(QThread):
             self.log(f"自动登录失败: {e}，请手动登录")
     
     def stop(self):
+        """停止线程"""
+        if not self.running: return
         self.running = False
+        self.log("正在停止...")
+        
+        # 在独立线程中执行清理，防止阻塞GUI
+        def force_stop():
+            if self.fetcher:
+                try:
+                    # 尝试关闭浏览器驱动
+                    if self.fetcher.driver:
+                        # 尝试强制结束驱动进程
+                        try:
+                            if hasattr(self.fetcher.driver, 'service') and self.fetcher.driver.service.process:
+                                # Windows: taskkill /F /PID <pid> /T
+                                if os.name == 'nt':
+                                    import subprocess
+                                    pid = self.fetcher.driver.service.process.pid
+                                    subprocess.run(
+                                        f"taskkill /F /PID {pid} /T", 
+                                        shell=True, 
+                                        stdout=subprocess.DEVNULL, 
+                                        stderr=subprocess.DEVNULL
+                                    )
+                        except:
+                            pass
+                        
+                        try:
+                            self.fetcher.driver.quit()
+                        except:
+                            pass
+                except:
+                    pass
+        
+        # 启动守护线程进行清理
+        threading.Thread(target=force_stop, daemon=True).start()
+    
+    def _cleanup(self):
+        """清理资源"""
+        if self._is_cleaning_up: return
+        self._is_cleaning_up = True
+        
         if self.fetcher:
             try:
                 self.fetcher.close()
             except:
                 pass
+            self.fetcher = None
 
 
 class MainWindow(QMainWindow):
@@ -295,121 +351,138 @@ class MainWindow(QMainWindow):
         # 设置样式
         self.setStyleSheet("""
             QMainWindow {
-                background-color: #1a1a2e;
+                background-color: #f5f6fa;
+                font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
             }
             QGroupBox {
                 font-weight: bold;
-                font-size: 13px;
-                color: #e94560;
-                border: 2px solid #16213e;
+                font-size: 14px;
+                color: #2f3640;
+                border: 1px solid #dcdde1;
                 border-radius: 8px;
                 margin-top: 12px;
-                padding: 10px;
-                background-color: #16213e;
+                padding: 20px;
+                background-color: #ffffff;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 15px;
                 padding: 0 8px;
+                background-color: #ffffff;
+                color: #0097e6;
             }
             QLabel {
-                color: #eaeaea;
-                font-size: 12px;
+                color: #2f3640;
+                font-size: 13px;
             }
             QLineEdit, QSpinBox {
-                padding: 8px 12px;
-                border: 1px solid #0f3460;
+                padding: 10px 12px;
+                min-height: 20px;
+                border: 1px solid #dcdde1;
                 border-radius: 6px;
-                background-color: #0f3460;
-                color: #eaeaea;
-                font-size: 12px;
-                selection-background-color: #e94560;
+                background-color: #f5f6fa;
+                color: #2f3640;
+                font-size: 13px;
             }
             QLineEdit:focus, QSpinBox:focus {
-                border: 1px solid #e94560;
+                border: 2px solid #0097e6;
+                background-color: #ffffff;
             }
             QPushButton {
                 padding: 10px 24px;
-                background-color: #e94560;
+                background-color: #0097e6;
                 color: white;
                 border: none;
                 border-radius: 6px;
                 font-weight: bold;
-                font-size: 13px;
+                font-size: 14px;
             }
             QPushButton:hover {
-                background-color: #ff6b6b;
+                background-color: #00a8ff;
             }
             QPushButton:pressed {
-                background-color: #c73e54;
+                background-color: #0084c9;
             }
             QPushButton:disabled {
-                background-color: #4a4a6a;
-                color: #8a8a9a;
+                background-color: #b2bec3;
+                color: #dfe6e9;
             }
             QPushButton#secondaryBtn {
-                background-color: #0f3460;
-                border: 1px solid #e94560;
+                background-color: #ffffff;
+                color: #2f3640;
+                border: 1px solid #dcdde1;
             }
             QPushButton#secondaryBtn:hover {
-                background-color: #1a4a7a;
+                background-color: #f5f6fa;
+                border: 1px solid #0097e6;
+                color: #0097e6;
             }
             QCheckBox {
-                color: #eaeaea;
-                font-size: 12px;
+                color: #2f3640;
+                font-size: 13px;
                 spacing: 8px;
             }
             QCheckBox::indicator {
                 width: 18px;
                 height: 18px;
                 border-radius: 4px;
-                border: 1px solid #0f3460;
-                background-color: #0f3460;
+                border: 1px solid #dcdde1;
+                background-color: #ffffff;
             }
             QCheckBox::indicator:checked {
-                background-color: #e94560;
-                border-color: #e94560;
+                background-color: #0097e6;
+                border-color: #0097e6;
             }
             QTextEdit {
-                background-color: #0f3460;
-                color: #00ff88;
-                border: 1px solid #16213e;
+                background-color: #ffffff;
+                color: #2f3640;
+                border: 1px solid #dcdde1;
                 border-radius: 6px;
                 font-family: 'Consolas', 'Monaco', monospace;
-                font-size: 11px;
-                padding: 8px;
+                font-size: 12px;
+                padding: 10px;
             }
             QProgressBar {
                 border: none;
                 border-radius: 4px;
-                background-color: #0f3460;
-                height: 8px;
+                background-color: #dcdde1;
+                height: 6px;
                 text-align: center;
             }
             QProgressBar::chunk {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                    stop:0 #e94560, stop:1 #ff6b6b);
+                background-color: #0097e6;
                 border-radius: 4px;
             }
             QTabWidget::pane {
-                border: 1px solid #16213e;
+                border: 1px solid #dcdde1;
                 border-radius: 6px;
-                background-color: #16213e;
+                background-color: #ffffff;
+                top: -1px;
             }
             QTabBar::tab {
-                background-color: #0f3460;
-                color: #eaeaea;
-                padding: 10px 20px;
-                margin-right: 2px;
+                background-color: #f5f6fa;
+                color: #7f8fa6;
+                padding: 12px 30px;
+                margin-right: 4px;
                 border-top-left-radius: 6px;
                 border-top-right-radius: 6px;
+                border: 1px solid #dcdde1;
+                border-bottom: none;
+                font-weight: bold;
+                font-size: 13px;
             }
             QTabBar::tab:selected {
-                background-color: #e94560;
+                background-color: #ffffff;
+                color: #0097e6;
+                border-bottom: 1px solid #ffffff;
+            }
+            QTabBar::tab:hover {
+                background-color: #ffffff;
             }
             QStatusBar {
-                background-color: #0f3460;
-                color: #eaeaea;
+                background-color: #ffffff;
+                color: #7f8fa6;
+                border-top: 1px solid #dcdde1;
             }
         """)
         
@@ -418,24 +491,26 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(15)
-        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(20)
+        main_layout.setContentsMargins(25, 25, 25, 25)
         
         # 标题
         title_label = QLabel("🛒 淘宝闪购商品监控工具")
         title_label.setFont(QFont("Microsoft YaHei", 20, QFont.Weight.Bold))
-        title_label.setStyleSheet("color: #e94560; margin-bottom: 10px;")
+        title_label.setStyleSheet("color: #2f3640; margin-bottom: 5px;")
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(title_label)
         
         # 使用分割器
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(1)
+        splitter.setStyleSheet("QSplitter::handle { background-color: #dcdde1; }")
         main_layout.addWidget(splitter, 1)
         
         # 左侧配置面板
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 10, 0)
+        left_layout.setContentsMargins(0, 0, 15, 0)
         
         # Tab页
         tabs = QTabWidget()
@@ -444,10 +519,12 @@ class MainWindow(QMainWindow):
         # --- 登录配置Tab ---
         login_tab = QWidget()
         login_layout = QVBoxLayout(login_tab)
+        login_layout.setContentsMargins(25, 25, 25, 25)
         
         login_group = QGroupBox("📱 淘宝账号登录")
         login_form = QFormLayout(login_group)
-        login_form.setSpacing(12)
+        login_form.setSpacing(20)
+        login_form.setContentsMargins(20, 25, 20, 20)
         
         self.username_input = QLineEdit()
         self.username_input.setPlaceholderText("输入淘宝账号/手机号")
@@ -471,7 +548,14 @@ class MainWindow(QMainWindow):
             "💡 提示: 首次登录需要在浏览器中完成验证。\n"
             "登录成功后，系统会保存登录状态，下次无需重复登录。"
         )
-        login_note.setStyleSheet("color: #8a8aaa; font-size: 11px; padding: 10px;")
+        login_note.setStyleSheet("""
+            color: #7f8fa6; 
+            font-size: 12px; 
+            padding: 15px; 
+            background-color: #f5f6fa; 
+            border-radius: 8px;
+            border: 1px solid #dcdde1;
+        """)
         login_note.setWordWrap(True)
         login_layout.addWidget(login_note)
         
@@ -481,10 +565,12 @@ class MainWindow(QMainWindow):
         # --- 店铺配置Tab ---
         shop_tab = QWidget()
         shop_layout = QVBoxLayout(shop_tab)
+        shop_layout.setContentsMargins(25, 25, 25, 25)
         
         shop_group = QGroupBox("🏪 店铺信息")
         shop_form = QFormLayout(shop_group)
-        shop_form.setSpacing(12)
+        shop_form.setSpacing(20)
+        shop_form.setContentsMargins(20, 25, 20, 20)
         
         self.chain_id_input = QLineEdit()
         self.chain_id_input.setPlaceholderText("连锁店ID")
@@ -503,7 +589,8 @@ class MainWindow(QMainWindow):
         # 通知配置
         notify_group = QGroupBox("📢 通知设置")
         notify_form = QFormLayout(notify_group)
-        notify_form.setSpacing(12)
+        notify_form.setSpacing(20)
+        notify_form.setContentsMargins(20, 25, 20, 20)
         
         self.webhook_input = QLineEdit()
         self.webhook_input.setPlaceholderText("企业微信机器人Webhook地址")
@@ -519,10 +606,12 @@ class MainWindow(QMainWindow):
         # --- 高级设置Tab ---
         advanced_tab = QWidget()
         advanced_layout = QVBoxLayout(advanced_tab)
+        advanced_layout.setContentsMargins(25, 25, 25, 25)
         
         browser_group = QGroupBox("🌐 浏览器设置")
         browser_form = QFormLayout(browser_group)
-        browser_form.setSpacing(12)
+        browser_form.setSpacing(20)
+        browser_form.setContentsMargins(20, 25, 20, 20)
         
         self.debug_port_spin = QSpinBox()
         self.debug_port_spin.setRange(1024, 65535)
@@ -534,7 +623,7 @@ class MainWindow(QMainWindow):
         self.browser_path_input.setPlaceholderText("留空自动检测")
         browser_path_btn = QPushButton("选择")
         browser_path_btn.setObjectName("secondaryBtn")
-        browser_path_btn.setFixedWidth(60)
+        browser_path_btn.setFixedWidth(70)
         browser_path_btn.clicked.connect(self.select_browser_path)
         browser_path_layout.addWidget(self.browser_path_input)
         browser_path_layout.addWidget(browser_path_btn)
@@ -547,7 +636,8 @@ class MainWindow(QMainWindow):
         
         monitor_group = QGroupBox("⏰ 监控设置")
         monitor_form = QFormLayout(monitor_group)
-        monitor_form.setSpacing(12)
+        monitor_form.setSpacing(20)
+        monitor_form.setContentsMargins(20, 25, 20, 20)
         
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(1, 1440)
@@ -560,7 +650,7 @@ class MainWindow(QMainWindow):
         self.export_dir_input.setText("./exports")
         export_btn = QPushButton("选择")
         export_btn.setObjectName("secondaryBtn")
-        export_btn.setFixedWidth(60)
+        export_btn.setFixedWidth(70)
         export_btn.clicked.connect(self.select_export_dir)
         export_layout.addWidget(self.export_dir_input)
         export_layout.addWidget(export_btn)
@@ -571,9 +661,11 @@ class MainWindow(QMainWindow):
         # 缓存管理
         cache_group = QGroupBox("🗑️ 缓存管理")
         cache_layout = QHBoxLayout(cache_group)
+        cache_layout.setContentsMargins(20, 25, 20, 20)
         
         clear_cache_btn = QPushButton("清除登录缓存")
         clear_cache_btn.setObjectName("secondaryBtn")
+        clear_cache_btn.setMinimumHeight(35)
         clear_cache_btn.clicked.connect(self.clear_cache)
         cache_layout.addWidget(clear_cache_btn)
         cache_layout.addStretch()
@@ -587,27 +679,48 @@ class MainWindow(QMainWindow):
         # 右侧日志和控制面板
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(10, 0, 0, 0)
+        right_layout.setContentsMargins(15, 0, 0, 0)
         
         # 控制按钮
         control_layout = QHBoxLayout()
+        control_layout.setSpacing(15)
         
         self.start_btn = QPushButton("▶ 开始监控")
-        self.start_btn.setFont(QFont("Microsoft YaHei", 12, QFont.Weight.Bold))
-        self.start_btn.setMinimumHeight(45)
+        self.start_btn.setMinimumHeight(50)
+        self.start_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 15px;
+                background-color: #0097e6;
+                border-radius: 8px;
+            }
+            QPushButton:hover { background-color: #00a8ff; }
+            QPushButton:pressed { background-color: #0084c9; }
+        """)
         self.start_btn.clicked.connect(self.start_monitor)
         control_layout.addWidget(self.start_btn)
         
         self.stop_btn = QPushButton("⏹ 停止")
         self.stop_btn.setObjectName("secondaryBtn")
-        self.stop_btn.setMinimumHeight(45)
+        self.stop_btn.setMinimumHeight(50)
+        self.stop_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 15px;
+                border-radius: 8px;
+            }
+        """)
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self.stop_monitor)
         control_layout.addWidget(self.stop_btn)
         
         self.save_btn = QPushButton("💾 保存配置")
         self.save_btn.setObjectName("secondaryBtn")
-        self.save_btn.setMinimumHeight(45)
+        self.save_btn.setMinimumHeight(50)
+        self.save_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 15px;
+                border-radius: 8px;
+            }
+        """)
         self.save_btn.clicked.connect(self.save_config)
         control_layout.addWidget(self.save_btn)
         
@@ -622,6 +735,7 @@ class MainWindow(QMainWindow):
         # 日志输出
         log_group = QGroupBox("📋 运行日志")
         log_layout = QVBoxLayout(log_group)
+        log_layout.setContentsMargins(15, 20, 15, 15)
         
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
@@ -639,23 +753,24 @@ class MainWindow(QMainWindow):
         # 结果统计
         result_group = QGroupBox("📊 监控结果")
         result_layout = QHBoxLayout(result_group)
+        result_layout.setContentsMargins(20, 20, 20, 20)
         
         self.off_sale_label = QLabel("已下架: 0")
-        self.off_sale_label.setStyleSheet("color: #ff6b6b; font-size: 16px; font-weight: bold;")
+        self.off_sale_label.setStyleSheet("color: #e84118; font-size: 16px; font-weight: bold;")
         result_layout.addWidget(self.off_sale_label)
         
         self.sold_out_label = QLabel("已售罄: 0")
-        self.sold_out_label.setStyleSheet("color: #ffd93d; font-size: 16px; font-weight: bold;")
+        self.sold_out_label.setStyleSheet("color: #fbc531; font-size: 16px; font-weight: bold;")
         result_layout.addWidget(self.sold_out_label)
         
         self.total_label = QLabel("总计: 0")
-        self.total_label.setStyleSheet("color: #6bcb77; font-size: 16px; font-weight: bold;")
+        self.total_label.setStyleSheet("color: #44bd32; font-size: 16px; font-weight: bold;")
         result_layout.addWidget(self.total_label)
         
         right_layout.addWidget(result_group)
         
         splitter.addWidget(right_panel)
-        splitter.setSizes([350, 550])
+        splitter.setSizes([380, 520])
         
         # 状态栏
         self.statusBar().showMessage("就绪")
@@ -757,7 +872,8 @@ class MainWindow(QMainWindow):
         """停止监控"""
         if self.worker:
             self.worker.stop()
-            self.worker.wait(5000)
+            # 不再阻塞等待，让 worker 的 force_stop 线程去处理
+            # self.worker.wait(5000)
         
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
@@ -828,12 +944,18 @@ class MainWindow(QMainWindow):
             if reply == QMessageBox.StandardButton.No:
                 event.ignore()
                 return
+            
+            # 停止工作线程
             self.stop_monitor()
         
         # 保存配置
         self.save_ui_to_config()
         self.config_manager.save()
         event.accept()
+        
+        # 强制退出整个进程，防止残留线程（如Selenium）阻塞导致无法关闭
+        # 延时一点点确保配置保存完成
+        QTimer.singleShot(100, lambda: os._exit(0))
 
 
 def main():
