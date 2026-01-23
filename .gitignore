@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Logs
+logs/
+*.log
+
+# Exports (可能包含敏感数据)
+exports/
+
+# Debug files
+debug_*.html
+debug_*.png
+
+# OS
+.DS_Store
+Thumbs.db
