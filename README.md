@@ -54,9 +54,15 @@ python build_exe.py
 ### WSL/Linux下交叉编译Windows exe
 
 ```bash
-# 在WSL中运行（会调用Windows的Python进行编译）
+# 进入项目目录并运行编译脚本
+cd /home/dyk/Cursor/OneManCompany/taobao_flashsale_monitor && bash build_from_wsl.sh
+
+# 或者分步执行：
+cd /home/dyk/Cursor/OneManCompany/taobao_flashsale_monitor
 bash build_from_wsl.sh
 ```
+
+> 💡 该脚本会自动调用Windows的Python进行编译，编译完成后exe文件会复制到 `dist/` 目录。
 
 ### 版本号自动递增
 
