@@ -24,23 +24,46 @@ import subprocess
 import time
 
 def ensure_dependencies():
-    """自动检查并安装依赖"""
-    try:
-        import requests
-        import openpyxl
-        import selenium
-    except ImportError:
-        print("检测到依赖缺失，正在自动安装...")
-        req_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt")
-        if os.path.exists(req_path):
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req_path])
-                print("依赖安装成功！")
-            except subprocess.CalledProcessError as e:
-                print(f"依赖安装失败: {e}")
+    """自动检查并安装所有依赖（无感知安装）"""
+    required_packages = {
+        'requests': 'requests',
+        'bs4': 'beautifulsoup4',
+        'lxml': 'lxml',
+        'openpyxl': 'openpyxl',
+        'schedule': 'schedule',
+        'selenium': 'selenium',
+    }
+    
+    missing = []
+    for import_name, package_name in required_packages.items():
+        try:
+            __import__(import_name)
+        except ImportError:
+            missing.append(package_name)
+    
+    if missing:
+        print(f"检测到依赖缺失: {', '.join(missing)}，正在自动安装...")
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "-q"] + missing,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            print("✓ 依赖安装成功！")
+        except subprocess.CalledProcessError:
+            # 静默安装失败，尝试使用 requirements.txt
+            req_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt")
+            if os.path.exists(req_path):
+                try:
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-r", req_path])
+                    print("✓ 依赖安装成功！")
+                except subprocess.CalledProcessError as e:
+                    print(f"✗ 依赖安装失败: {e}")
+                    print(f"  请手动运行: pip install -r {req_path}")
+                    sys.exit(1)
+            else:
+                print(f"✗ 依赖安装失败，请手动安装: pip install {' '.join(missing)}")
                 sys.exit(1)
-        else:
-            print(f"警告: 未找到 {req_path}")
 
 ensure_dependencies()
 
