@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-echo 正在启动淘宝闪购监控工具...
+echo 正在启动淘宝闪购智能助手Agent...
 echo.
 
 :: 检查Python

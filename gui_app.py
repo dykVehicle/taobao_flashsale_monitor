@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-淘宝闪购监控工具 - Windows桌面应用程序
+淘宝闪购智能助手Agent - Windows桌面应用程序
 带GUI界面，支持账号密码登录
 """
 
@@ -351,7 +351,7 @@ class MainWindow(QMainWindow):
     
     def init_ui(self):
         """初始化界面"""
-        self.setWindowTitle(f"淘宝闪购监控工具 v{get_version()}")
+        self.setWindowTitle(f"淘宝闪购智能助手Agent v{get_version()}")
         self.setMinimumSize(1150, 750)  # 增加默认尺寸，适应 Windows 缩放
         self.resize(1200, 800)
         
@@ -790,7 +790,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("就绪")
         
         # 初始日志
-        self.log("淘宝闪购监控工具已启动")
+        self.log("淘宝闪购智能助手Agent已启动")
         self.log("请配置账号信息后点击「开始监控」")
     
     def load_config_to_ui(self):

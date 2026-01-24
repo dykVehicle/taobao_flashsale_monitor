@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 echo ====================================
-echo  淘宝闪购监控工具 - Windows打包脚本
+echo  淘宝闪购智能助手Agent - Windows打包脚本
 echo ====================================
 echo.
 
@@ -27,6 +27,6 @@ python build_exe.py
 echo.
 echo [3/3] 完成！
 echo.
-echo 打包完成后，可执行文件位于: dist\淘宝闪购监控工具.exe
+echo 打包完成后，可执行文件位于: dist\淘宝闪购智能助手Agent.exe
 echo.
 pause
