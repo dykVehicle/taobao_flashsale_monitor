@@ -508,7 +508,7 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(25, 25, 25, 25)
         
         # 标题
-        title_label = QLabel("🛒 淘宝闪购商品监控工具")
+        title_label = QLabel("🛒 淘宝闪购智能助手Agent")
         title_label.setFont(QFont("Microsoft YaHei", 20, QFont.Weight.Bold))
         title_label.setStyleSheet("color: #2f3640; margin-bottom: 5px;")
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
