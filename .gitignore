@@ -35,3 +35,6 @@ build/
 
 # Cookies
 cookies_*.pkl
+
+# Archive (unused files)
+_archive/
