@@ -12,8 +12,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # 获取Windows用户名
 WIN_USER=$(cmd.exe /c "echo %USERNAME%" 2>/dev/null | tr -d '\r\n')
-if [ -z "$WIN_USER" ]; then
-    WIN_USER="Default"
+if [ -z "$WIN_USER" ] || [ "$WIN_USER" == "%USERNAME%" ]; then
+    WIN_USER="dyk"  # Fallback to known user if detection fails
 fi
 
 # Windows临时编译目录
@@ -26,13 +26,23 @@ echo ""
 
 # 检查Windows Python
 echo "[1/5] 检查Windows Python..."
-WIN_PYTHON_VERSION=$(cmd.exe /c "python --version" 2>&1 | tr -d '\r')
+# 尝试直接运行 python
+WIN_PYTHON_VERSION=$(cd /mnt/c && cmd.exe /c "python --version" 2>&1 | tr -d '\r')
 if [[ ! "$WIN_PYTHON_VERSION" =~ "Python" ]]; then
-    echo "错误: 未找到Windows Python，请先安装Python"
-    echo "下载地址: https://www.python.org/downloads/"
-    exit 1
+    echo "警告: 未能通过默认路径找到Python ($WIN_PYTHON_VERSION)"
+    echo "尝试查找 Conda 环境..."
+    # 尝试常见的 Conda 路径
+    if [ -f "/mnt/d/ProgramData/miniconda3/python.exe" ]; then
+        echo "  ✓ 找到 Conda Python: D:\ProgramData\miniconda3\python.exe"
+        PYTHON_CMD="D:\ProgramData\miniconda3\python.exe"
+    else
+        echo "错误: 未找到Windows Python，请确保 python 在 PATH 中"
+        exit 1
+    fi
+else
+    echo "  ✓ 找到 $WIN_PYTHON_VERSION"
+    PYTHON_CMD="python"
 fi
-echo "  ✓ 找到 $WIN_PYTHON_VERSION"
 
 # 复制文件到Windows目录
 echo ""
@@ -52,7 +62,7 @@ echo "  ✓ 文件复制完成"
 # 安装依赖
 echo ""
 echo "[3/5] 安装Python依赖..."
-cmd.exe /c "pip install -q PyQt6 cryptography selenium openpyxl requests beautifulsoup4 lxml pyinstaller" 2>/dev/null
+(cd /mnt/c && cmd.exe /c "$PYTHON_CMD -m pip install -q PyQt6 cryptography selenium openpyxl requests beautifulsoup4 lxml pyinstaller" 2>/dev/null)
 echo "  ✓ 依赖安装完成"
 
 # 切换到项目目录并打包
@@ -61,7 +71,7 @@ echo "[4/5] 开始打包..."
 echo "  这可能需要2-5分钟，请耐心等待..."
 echo ""
 
-cmd.exe /c "cd /d $WIN_BUILD_PATH && python build_exe.py"
+(cd /mnt/c && cmd.exe /c "chcp 65001 >nul && cd /d $WIN_BUILD_PATH && $PYTHON_CMD build_exe.py")
 
 # 检查结果并复制回来
 echo ""
