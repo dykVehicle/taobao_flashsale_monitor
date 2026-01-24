@@ -122,8 +122,8 @@ def build():
         '--exclude-module=matplotlib',
         '--exclude-module=numpy',
         '--exclude-module=pandas',
-        # Clean mode
-        '--clean',
+        # Performance: use cache (no --clean), disable UPX compression
+        '--noupx',
     ]
     
     # Add icon if exists
@@ -183,7 +183,7 @@ def build_with_console():
         '--hidden-import=PyQt6',
         '--hidden-import=openpyxl',
         '--hidden-import=requests',
-        '--clean',
+        '--noupx',
     ]
     
     cmd = [sys.executable, '-m', 'PyInstaller'] + args

@@ -127,12 +127,12 @@ class SeleniumGoodsFetcher:
         if self.browser_path and os.path.exists(self.browser_path):
             return self.browser_path
         
-        # 优先从 PATH 查找
+        # 优先从 PATH 查找 (Chrome 优先)
         candidates_in_path = [
-            "chromium",
-            "chromium.exe",
             "chrome",
             "chrome.exe",
+            "chromium",
+            "chromium.exe",
             "msedge",
             "msedge.exe",
         ]
@@ -152,24 +152,23 @@ class SeleniumGoodsFetcher:
             user_profile = os.environ.get('USERPROFILE', '')
             
             candidates.extend([
-                # Microsoft Edge（Windows 10/11 自带，最可能存在）
-                os.path.join(program_files, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-                os.path.join(program_files_x86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-                # Google Chrome
+                # Google Chrome（优先）
                 os.path.join(program_files, 'Google', 'Chrome', 'Application', 'chrome.exe'),
                 os.path.join(program_files_x86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
                 r"C:\Program Files\Google\Chrome\Application\chrome.exe",
                 r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                # Microsoft Edge（备选）
+                os.path.join(program_files, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+                os.path.join(program_files_x86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
             ])
             
-            # 用户目录下的浏览器
+            # 用户目录下的浏览器 (Chrome 优先)
             if local_app_data:
                 candidates.extend([
                     os.path.join(local_app_data, 'Google', 'Chrome', 'Application', 'chrome.exe'),
                     os.path.join(local_app_data, 'Chromium', 'Application', 'chrome.exe'),
-                    os.path.join(local_app_data, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
                 ])
             
             # Chromium
@@ -180,20 +179,20 @@ class SeleniumGoodsFetcher:
                 r"C:\Program Files (x86)\Chromium\Application\chrome.exe",
             ])
             
-        elif system == "Darwin":  # macOS
+        elif system == "Darwin":  # macOS (Chrome 优先)
             candidates.extend([
                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
                 "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
             ])
-        else:  # Linux
+        else:  # Linux (Chrome 优先)
             candidates.extend([
                 "/usr/bin/google-chrome",
                 "/usr/bin/google-chrome-stable",
                 "/usr/bin/chromium-browser",
                 "/usr/bin/chromium",
-                "/usr/bin/microsoft-edge",
                 "/snap/bin/chromium",
+                "/usr/bin/microsoft-edge",
             ])
         
         for p in candidates:
