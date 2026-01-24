@@ -100,6 +100,7 @@ def build():
         '--add-data=config_manager.py;.',
         '--add-data=version.json;.',
         # Hidden imports
+        '--hidden-import=version',
         '--hidden-import=selenium',
         '--hidden-import=selenium.webdriver',
         '--hidden-import=selenium.webdriver.chrome.options',
@@ -174,6 +175,7 @@ def build_with_console():
         '--add-data=selenium_fetcher.py;.',
         '--add-data=config_manager.py;.',
         '--add-data=version.json;.',
+        '--hidden-import=version',
         '--hidden-import=selenium',
         '--hidden-import=selenium.webdriver',
         '--hidden-import=selenium.webdriver.edge.options',

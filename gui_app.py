@@ -949,17 +949,8 @@ class MainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """关闭窗口"""
+        # 如果监控正在运行，直接停止（不提示确认）
         if self.worker and self.worker.isRunning():
-            reply = QMessageBox.question(
-                self, "确认",
-                "监控正在运行中，确定要退出吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if reply == QMessageBox.StandardButton.No:
-                event.ignore()
-                return
-            
-            # 停止工作线程
             self.stop_monitor()
         
         # 保存配置
