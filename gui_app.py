@@ -44,9 +44,15 @@ from PyQt6.QtWidgets import (
     QStatusBar, QFrame, QScrollArea, QSplitter, QFileDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont, QIcon, QPalette, QColor, QTextCursor
+from PyQt6.QtGui import QFont, QIcon, QPalette, QColor, QTextCursor, QFontDatabase
 
 from config_manager import ConfigManager, AppConfig
+try:
+    from version import get_version
+except ImportError:
+    # Fallback if version module is missing during dev or specific build contexts
+    def get_version(): return "1.0"
+
 
 
 class MonitorWorker(QThread):
@@ -345,7 +351,6 @@ class MainWindow(QMainWindow):
     
     def init_ui(self):
         """初始化界面"""
-        from version import get_version
         self.setWindowTitle(f"淘宝闪购监控工具 v{get_version()}")
         self.setMinimumSize(1150, 750)  # 增加默认尺寸，适应 Windows 缩放
         self.resize(1200, 800)
@@ -354,7 +359,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #f5f6fa;
-                font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+                font-family: 'Microsoft YaHei', 'WenQuanYi Micro Hei', 'Noto Sans CJK SC', 'SimHei', 'Segoe UI', sans-serif;
             }
             QGroupBox {
                 font-weight: bold;
@@ -977,12 +982,23 @@ def main():
     app.setStyle("Fusion")
     
     # 设置统一字体
+    font = None
     if os.name == 'nt':
         # Windows 下通常渲染较大，使用 9pt
         font = QFont("Microsoft YaHei", 9)
     else:
-        # Linux/Mac 下使用 10pt
-        font = QFont("sans-serif", 10)
+        # Linux/Mac 下尝试查找可用中文字体
+        available_fonts = QFontDatabase.families()
+        cn_fonts = ["WenQuanYi Micro Hei", "Noto Sans CJK SC", "Source Han Sans CN", "SimHei", "Droid Sans Fallback"]
+        
+        found_font = "sans-serif"
+        for f in cn_fonts:
+            if f in available_fonts:
+                found_font = f
+                break
+                
+        font = QFont(found_font, 10)
+        
     app.setFont(font)
     
     window = MainWindow()
