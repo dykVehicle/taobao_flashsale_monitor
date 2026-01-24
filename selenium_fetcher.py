@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-淘宝闪购商品监控工具 - Selenium自动化抓取模块
+淘宝闪购智能助手Agent - Selenium自动化抓取模块
 通过浏览器自动化获取商品数据，解决Cookie/API问题
 """
 

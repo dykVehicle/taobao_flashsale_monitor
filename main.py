@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-淘宝闪购商品监控工具 - 主程序
+淘宝闪购智能助手Agent - 主程序
 
 功能:
 1. 通过Selenium抓取淘宝闪购商家版的商品数据
@@ -387,7 +387,7 @@ def run_monitor(fetcher: SeleniumGoodsFetcher, export_only: bool = False, export
 
 def main():
     """主函数"""
-    parser = argparse.ArgumentParser(description="淘宝闪购商品监控工具")
+    parser = argparse.ArgumentParser(description="淘宝闪购智能助手Agent")
     parser.add_argument("--export-only", "-e", action="store_true", help="仅导出不发送通知")
     parser.add_argument("--export-always", action="store_true", help="即使无问题商品也导出Excel（持续模式下不推荐）")
     parser.add_argument("--once", action="store_true", help="仅运行一次后退出（默认持续模式）")
@@ -400,7 +400,7 @@ def main():
     args = parser.parse_args()
     
     print("\n" + "=" * 60)
-    print("淘宝闪购商品监控工具")
+    print("淘宝闪购智能助手Agent")
     print("=" * 60)
     print("使用说明:")
     print("1. 程序会自动启动 Chromium/Chrome（远程调试模式）并复用固定 profile 保存登录态")
