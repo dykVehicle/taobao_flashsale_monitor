@@ -3,7 +3,7 @@
 # 用法: bash build_from_wsl.sh
 
 echo "======================================"
-echo " 淘宝闪购监控工具 - 从WSL编译Windows exe"
+echo " 淘宝闪购智能助手Agent - 从WSL编译Windows exe"
 echo "======================================"
 echo ""
 
@@ -47,8 +47,10 @@ fi
 # 复制文件到Windows目录
 echo ""
 echo "[2/5] 复制项目文件到Windows..."
-rm -rf "$WIN_BUILD_DIR" 2>/dev/null
+# 保留 dist 目录（旧的编译产物），只清理源文件和 build 目录
 mkdir -p "$WIN_BUILD_DIR"
+rm -rf "$WIN_BUILD_DIR/build" 2>/dev/null
+rm -f "$WIN_BUILD_DIR"/*.py "$WIN_BUILD_DIR"/*.json "$WIN_BUILD_DIR"/*.txt "$WIN_BUILD_DIR"/*.spec 2>/dev/null
 
 # 复制必要文件
 cp "$SCRIPT_DIR/gui_app.py" "$WIN_BUILD_DIR/"
