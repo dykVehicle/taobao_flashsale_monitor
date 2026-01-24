@@ -345,8 +345,10 @@ class MainWindow(QMainWindow):
     
     def init_ui(self):
         """初始化界面"""
-        self.setWindowTitle("淘宝闪购监控工具 v1.0")
-        self.setMinimumSize(900, 700)
+        from version import get_version
+        self.setWindowTitle(f"淘宝闪购监控工具 v{get_version()}")
+        self.setMinimumSize(1150, 750)  # 增加默认尺寸，适应 Windows 缩放
+        self.resize(1200, 800)
         
         # 设置样式
         self.setStyleSheet("""
@@ -356,24 +358,24 @@ class MainWindow(QMainWindow):
             }
             QGroupBox {
                 font-weight: bold;
-                font-size: 14px;
+                font-size: 13px; /* 稍微减小字体 */
                 color: #2f3640;
                 border: 1px solid #dcdde1;
                 border-radius: 8px;
-                margin-top: 12px;
-                padding: 20px;
+                margin-top: 10px;
+                padding: 15px; /* 稍微减小内边距 */
                 background-color: #ffffff;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 15px;
-                padding: 0 8px;
+                padding: 0 5px;
                 background-color: #ffffff;
                 color: #0097e6;
             }
             QLabel {
                 color: #2f3640;
-                font-size: 13px;
+                font-size: 12px; /* 稍微减小字体 */
             }
             QLineEdit, QSpinBox {
                 padding: 10px 12px;
@@ -509,6 +511,7 @@ class MainWindow(QMainWindow):
         
         # 左侧配置面板
         left_panel = QWidget()
+        left_panel.setMinimumWidth(400)  # 确保左侧面板不被过度压缩
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 15, 0)
         
@@ -960,11 +963,27 @@ class MainWindow(QMainWindow):
 
 def main():
     """主函数"""
+    # 启用高 DPI 缩放
+    if hasattr(Qt.ApplicationAttribute, 'AA_EnableHighDpiScaling'):
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
+    if hasattr(Qt.ApplicationAttribute, 'AA_UseHighDpiPixmaps'):
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
+    
+    # 针对 Windows 的额外缩放设置
+    if os.name == 'nt':
+        os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
+    
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     
-    # 设置应用程序图标（如果有的话）
-    # app.setWindowIcon(QIcon("icon.ico"))
+    # 设置统一字体
+    if os.name == 'nt':
+        # Windows 下通常渲染较大，使用 9pt
+        font = QFont("Microsoft YaHei", 9)
+    else:
+        # Linux/Mac 下使用 10pt
+        font = QFont("sans-serif", 10)
+    app.setFont(font)
     
     window = MainWindow()
     window.show()

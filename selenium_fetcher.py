@@ -306,9 +306,28 @@ class SeleniumGoodsFetcher:
                 try:
                     if os.geteuid() == 0:
                         cmd.append("--no-sandbox")
+                        cmd.append("--disable-dev-shm-usage")  # 配合 no-sandbox 使用
                         logger.warning("检测到以 root 用户运行，已添加 --no-sandbox 参数")
                 except AttributeError:
                     pass  # Windows没有geteuid
+            
+            # 基础参数
+            cmd.extend([
+                "--disable-infobars",
+                "--disable-session-crashed-bubble",
+                "--no-default-browser-check",
+                "--check-for-update-interval=604800",
+                "--disable-extensions",
+                "--test-type",  # 消除 unsupported flag 警告
+                "--ignore-certificate-errors",
+                "--disable-gpu",  # 某些环境下有助于稳定性
+                "--no-first-run"
+            ])
+
+            # 尝试移除"Chrome正在受到自动测试软件的控制"提示
+            # 注意：这需要通过 experimental_options 设置，但在启动命令行中
+            # 我们可以尝试添加 --disable-blink-features=AutomationControlled
+            cmd.append("--disable-blink-features=AutomationControlled")
             
             if open_url:
                 cmd.append(open_url)
