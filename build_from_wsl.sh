@@ -80,10 +80,13 @@ echo ""
 echo ""
 echo "[5/5] 检查打包结果..."
 
-# 查找生成的exe文件（支持版本号）
-EXE_FILE=$(find "$WIN_BUILD_DIR/dist" -name "TaobaoFlashSaleMonitor*.exe" -type f 2>/dev/null | head -1)
-if [ -n "$EXE_FILE" ] && [ -f "$EXE_FILE" ]; then
-    EXE_NAME=$(basename "$EXE_FILE")
+# 从 version.json 读取刚编译的版本号
+BUILD_VERSION=$(cat "$WIN_BUILD_DIR/version.json" 2>/dev/null | grep -oP '"version"\s*:\s*"\K[^"]+')
+EXE_NAME="TaobaoFlashSaleMonitorV${BUILD_VERSION}.exe"
+EXE_FILE="$WIN_BUILD_DIR/dist/$EXE_NAME"
+
+if [ -n "$BUILD_VERSION" ] && [ -f "$EXE_FILE" ]; then
+    echo "  编译版本: V$BUILD_VERSION"
     
     # 复制exe回原目录
     mkdir -p "$SCRIPT_DIR/dist"
