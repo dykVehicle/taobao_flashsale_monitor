@@ -383,8 +383,8 @@ class MainWindow(QMainWindow):
                 font-size: 12px; /* 稍微减小字体 */
             }
             QLineEdit, QSpinBox {
-                padding: 10px 12px;
-                min-height: 20px;
+                padding: 5px 8px; /* 减小内边距，防止遮挡按钮 */
+                min-height: 28px; /* 增加最小高度 */
                 border: 1px solid #dcdde1;
                 border-radius: 6px;
                 background-color: #f5f6fa;
@@ -395,14 +395,20 @@ class MainWindow(QMainWindow):
                 border: 2px solid #0097e6;
                 background-color: #ffffff;
             }
+            /* 确保SpinBox按钮可见 */
+            QSpinBox::up-button, QSpinBox::down-button {
+                width: 20px;
+                background-color: transparent;
+                border: none;
+            }
             QPushButton {
-                padding: 10px 24px;
+                padding: 8px 16px; /* 减小按钮内边距 */
                 background-color: #0097e6;
                 color: white;
                 border: none;
                 border-radius: 6px;
                 font-weight: bold;
-                font-size: 14px;
+                font-size: 13px; /* 稍微减小字体 */
             }
             QPushButton:hover {
                 background-color: #00a8ff;
