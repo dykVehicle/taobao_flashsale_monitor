@@ -248,8 +248,12 @@ class SeleniumGoodsFetcher:
             return 'edge' in browser_exe.lower() or 'msedge' in browser_exe.lower()
         return False
     
-    def _init_driver(self):
-        """连接到已运行的浏览器（远程调试模式），如果未运行则尝试启动"""
+    def _init_driver(self) -> bool:
+        """连接到已运行的浏览器（远程调试模式），如果未运行则尝试启动
+        
+        Returns:
+            bool: 是否成功连接
+        """
         try:
             from selenium import webdriver
             
@@ -266,6 +270,7 @@ class SeleniumGoodsFetcher:
                     self.driver = webdriver.Edge(options=options)
                     self.driver.implicitly_wait(10)
                     logger.info("成功连接到Edge浏览器（远程调试）")
+                    return True
                 except Exception as e:
                     logger.info(f"未能连接到现有Edge实例: {e}")
                     logger.info("尝试自动启动Edge...")
@@ -274,6 +279,7 @@ class SeleniumGoodsFetcher:
                         self.driver = webdriver.Edge(options=options)
                         self.driver.implicitly_wait(10)
                         logger.info("成功启动并连接到Edge浏览器（远程调试）")
+                        return True
                     else:
                         raise Exception("无法自动启动Edge浏览器")
             else:
@@ -286,6 +292,7 @@ class SeleniumGoodsFetcher:
                     self.driver = webdriver.Chrome(options=options)
                     self.driver.implicitly_wait(10)
                     logger.info("成功连接到Chrome浏览器（远程调试）")
+                    return True
                 except Exception as e:
                     logger.info(f"未能连接到现有Chrome实例: {e}")
                     logger.info("尝试自动启动Chrome...")
@@ -294,6 +301,7 @@ class SeleniumGoodsFetcher:
                         self.driver = webdriver.Chrome(options=options)
                         self.driver.implicitly_wait(10)
                         logger.info("成功启动并连接到Chrome浏览器（远程调试）")
+                        return True
                     else:
                         raise Exception("无法自动启动Chrome浏览器")
             
@@ -309,7 +317,7 @@ class SeleniumGoodsFetcher:
                 logger.error(
                     f'"{browser_exe}" --remote-debugging-port={self.debug_port} --user-data-dir="{self.user_data_dir}"'
                 )
-            raise
+            return False
 
     def _launch_chrome_debug(self, open_url: Optional[str] = None) -> bool:
         """尝试启动浏览器调试模式（Chromium/Chrome/Edge）"""
