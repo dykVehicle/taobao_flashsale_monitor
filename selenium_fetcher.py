@@ -812,9 +812,40 @@ class SeleniumGoodsFetcher:
                 self._log(f"   查找搜索框出错: {e}")
             
             if search_input:
-                search_input.clear()
-                search_input.send_keys(shop_keyword)
-                self._log(f"   步骤2: ✓ 已输入搜索关键字: {shop_keyword}")
+                # 使用多种方式尝试输入，处理元素不可交互的情况
+                input_success = False
+                for attempt in range(3):
+                    try:
+                        # 先等待元素可交互
+                        time.sleep(0.3)
+                        # 尝试使用Selenium的clear和send_keys
+                        search_input.clear()
+                        search_input.send_keys(shop_keyword)
+                        input_success = True
+                        break
+                    except Exception as e:
+                        # 如果Selenium方法失败，尝试使用JavaScript
+                        try:
+                            self.driver.execute_script("""
+                                arguments[0].focus();
+                                arguments[0].value = '';
+                                arguments[0].value = arguments[1];
+                                arguments[0].dispatchEvent(new Event('input', {bubbles: true}));
+                                arguments[0].dispatchEvent(new Event('change', {bubbles: true}));
+                            """, search_input, shop_keyword)
+                            input_success = True
+                            break
+                        except:
+                            if attempt < 2:
+                                time.sleep(0.5)
+                            continue
+                
+                if input_success:
+                    self._log(f"   步骤2: ✓ 已输入搜索关键字: {shop_keyword}")
+                else:
+                    result['message'] = '搜索框无法输入'
+                    self._log(f"   步骤2: ✗ {result['message']}")
+                    return result
             else:
                 result['message'] = '未找到搜索框'
                 self._log(f"   步骤2: ✗ {result['message']}")
