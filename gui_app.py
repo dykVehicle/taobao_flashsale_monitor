@@ -214,6 +214,19 @@ class MonitorWorker(QThread):
         
         self.log("✓ 登录状态正常")
         
+        # 设置日志回调，让 switch_shop 的日志能正确输出
+        self.fetcher._log_callback = log_callback
+        
+        # 先导航到商品管理页面，确保页面上有门店切换器
+        self.log("导航到商品管理页面...")
+        try:
+            goods_url = f"{self.fetcher.base_url}/app/shop/{self.fetcher.shop_id}/food#app.shop.food?path=management"
+            self.fetcher.driver.get(goods_url)
+            time.sleep(5)  # 等待页面加载
+            self.log("✓ 已进入商品管理页面")
+        except Exception as e:
+            self.log(f"⚠ 导航失败: {e}")
+        
         self.log(f"")
         self.log(f"{'='*50}")
         self.log(f"开始多门店监控，共 {total_shops} 个门店")
@@ -233,6 +246,7 @@ class MonitorWorker(QThread):
             self.log(f"└{'─'*48}┘")
             
             # 切换门店
+            self.log(f"   🔄 开始切换到门店: {shop.name}")
             switch_result = self.fetcher.switch_shop(shop.name)
             
             if not switch_result['success']:
@@ -244,16 +258,19 @@ class MonitorWorker(QThread):
                     all_results['shops_skipped'] += 1
                 continue
             
+            self.log(f"   ✓ 门店切换成功: {switch_result.get('shop_name', '')}")
+            
             # 等待页面加载
             time.sleep(3)
             
-            # 抓取商品数据
+            # 抓取商品数据（跳过导航，使用已切换的门店）
             try:
                 goods_list = self.fetcher.login_and_fetch(
                     auto_login=False,
                     wait_for_login=False,
                     login_timeout=60,
                     log_callback=log_callback,
+                    skip_navigation=True,  # 多门店模式：不要重新导航，使用当前门店
                 )
                 
                 off_sale = [g for g in goods_list if g.status == "OFF_SALE"]

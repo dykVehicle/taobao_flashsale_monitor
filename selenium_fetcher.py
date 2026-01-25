@@ -413,6 +413,7 @@ class SeleniumGoodsFetcher:
         login_timeout: int = 600,
         dump_debug: bool = False,
         log_callback = None,
+        skip_navigation = False,
     ) -> List[GoodsItem]:
         """
         登录并抓取商品
@@ -423,6 +424,7 @@ class SeleniumGoodsFetcher:
             login_timeout: 等待登录最大秒数
             dump_debug: 是否保存页面截图和HTML（用于排查页面结构）
             log_callback: 日志回调函数，用于输出日志到GUI
+            skip_navigation: 是否跳过导航（多门店模式下已切换门店时使用）
             
         Returns:
             商品列表
@@ -437,11 +439,37 @@ class SeleniumGoodsFetcher:
         from selenium.webdriver.support import expected_conditions as EC
         
         try:
-            # 访问饿了么商家后台 - 商品管理页面
-            # 正确的URL格式: https://melody.shop.ele.me/app/shop/{shop_id}/food#app.shop.food?path=management
-            goods_url = f"{self.base_url}/app/shop/{self.shop_id}/food#app.shop.food?path=management"
-            self._log(f"正在访问商品管理页面...")
-            self.driver.get(goods_url)
+            # 多门店模式下已切换门店，跳过导航
+            if skip_navigation:
+                self._log("使用当前门店页面...")
+                # 检查是否在商品管理页面
+                current_url = self.driver.current_url
+                if "food" not in current_url or "management" not in current_url:
+                    # 需要点击商品管理菜单
+                    self._log("导航到商品管理页面...")
+                    try:
+                        # 点击左侧菜单的"商品管理"
+                        self.driver.execute_script('''
+                            var menuItems = document.querySelectorAll('*');
+                            for (var i = 0; i < menuItems.length; i++) {
+                                var el = menuItems[i];
+                                var text = (el.innerText || '').trim();
+                                if (text === '商品管理' || text === '商品列表') {
+                                    el.click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        ''')
+                        time.sleep(3)
+                    except:
+                        pass
+            else:
+                # 访问饿了么商家后台 - 商品管理页面
+                # 正确的URL格式: https://melody.shop.ele.me/app/shop/{shop_id}/food#app.shop.food?path=management
+                goods_url = f"{self.base_url}/app/shop/{self.shop_id}/food#app.shop.food?path=management"
+                self._log(f"正在访问商品管理页面...")
+                self.driver.get(goods_url)
             
             # 等待页面加载
             self._log("等待页面加载...")
@@ -590,18 +618,20 @@ class SeleniumGoodsFetcher:
         except:
             return True
     
-    def switch_shop(self, shop_keyword: str, timeout: int = 30) -> dict:
+    def switch_shop(self, shop_keyword: str, timeout: int = 30, max_retries: int = 2) -> dict:
         """
-        切换到指定门店
+        切换到指定门店（带验证和重试机制）
         
         根据实际DOM结构流程：
         1. 点击 shopSwitcher 中的 clk-area 打开下拉菜单
         2. 在搜索框（placeholder="搜索店铺名称/ID"）中输入门店名称关键字
         3. 点击 li.cook-cascader-menu-item 中"营业中"的门店
+        4. 验证切换是否成功，失败则重试
         
         Args:
             shop_keyword: 门店名称关键字（用于搜索，如"闵行维璟"）
             timeout: 超时时间（秒）
+            max_retries: 最大重试次数（默认2次）
             
         Returns:
             dict: {
@@ -624,6 +654,71 @@ class SeleniumGoodsFetcher:
         if not self.driver:
             result['message'] = '浏览器未初始化'
             return result
+        
+        # 带重试的切换逻辑
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                self._log(f"   🔄 重试切换 ({attempt}/{max_retries})...")
+                time.sleep(2)
+            
+            result = self._do_switch_shop(shop_keyword, timeout)
+            
+            # 验证切换是否成功
+            if result['success']:
+                time.sleep(3)  # 等待页面稳定和DOM更新
+                current_shop = self.get_current_shop_name(max_retries=3)  # 带重试的获取
+                
+                if current_shop and shop_keyword in current_shop:
+                    self._log(f"   ✓ 验证成功: 当前门店为 {current_shop}")
+                    result['shop_name'] = current_shop
+                    
+                    # 检查切换后的实际营业状态
+                    status_info = self.get_current_shop_status()
+                    actual_status = status_info.get('status', '')
+                    is_actually_open = status_info.get('is_open', False)
+                    
+                    self._log(f"   📊 当前营业状态: {actual_status if actual_status else '未知'}")
+                    
+                    if not is_actually_open and actual_status:
+                        # 门店已打烊或休息中
+                        self._log(f"   ⚠ 门店 [{current_shop}] 当前状态: {actual_status}，跳过监控")
+                        result['success'] = False
+                        result['is_open'] = False
+                        result['message'] = f"门店已{actual_status}"
+                        return result
+                    
+                    result['is_open'] = True
+                    return result
+                else:
+                    self._log(f"   ⚠ 验证失败: 当前门店为 '{current_shop}'，不包含 '{shop_keyword}'")
+                    result['success'] = False
+                    result['message'] = f"切换后验证失败，当前门店: {current_shop}"
+            
+            # 如果不成功且还有重试机会，继续重试
+            if not result['success'] and attempt < max_retries:
+                continue
+            
+            # 最后一次尝试后仍然失败，打印详细信息
+            if not result['success']:
+                self._log(f"   ✗ 切换门店失败 [门店: {shop_keyword}]")
+                self._log(f"      失败原因: {result['message']}")
+                self._log(f"      已重试: {attempt} 次")
+            
+            break
+        
+        return result
+    
+    def _do_switch_shop(self, shop_keyword: str, timeout: int = 30) -> dict:
+        """执行门店切换的内部方法"""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
+        
+        result = {
+            'success': False,
+            'shop_name': '',
+            'is_open': False,
+            'message': ''
+        }
         
         try:
             self._log(f"正在切换到门店: {shop_keyword}")
@@ -830,36 +925,151 @@ class SeleniumGoodsFetcher:
             self._log(f"   {traceback.format_exc()}")
             return result
     
-    def get_current_shop_name(self) -> str:
-        """获取当前门店名称"""
+    def get_current_shop_name(self, max_retries: int = 3) -> str:
+        """
+        获取当前门店名称（带重试机制）
+        
+        Args:
+            max_retries: 最大重试次数，每次间隔1秒
+        """
         if not self.driver:
             return ""
         
-        try:
-            js_get_shop = '''
-                // 查找右上角的门店名称
-                var allElements = document.querySelectorAll('*');
-                for (var i = 0; i < allElements.length; i++) {
-                    var el = allElements[i];
-                    var text = (el.innerText || '').trim();
-                    var rect = el.getBoundingClientRect();
-                    var cls = (typeof el.className === 'string') ? el.className : '';
+        for attempt in range(max_retries):
+            try:
+                js_get_shop = '''
+                    // 方法1: 从 shopSwitcher 获取（最可靠）
+                    var switcher = document.querySelector('[class*="shopSwitcher"]');
+                    if (switcher) {
+                        var text = switcher.innerText || '';
+                        var lines = text.split('\\n');
+                        for (var i = 0; i < lines.length; i++) {
+                            var line = lines[i].trim();
+                            // 查找包含店铺名称的行（通常包含"手打"或"手作"，或者括号结尾）
+                            if ((line.indexOf('手打') !== -1 || line.indexOf('手作') !== -1) && 
+                                line.indexOf('账号') === -1 && line.length < 60) {
+                                return line;
+                            }
+                        }
+                    }
                     
-                    // 顶部栏中的门店名称
-                    if (rect.top > 0 && rect.top < 80 && rect.left > 300 &&
-                        el.offsetWidth > 100 && el.offsetWidth < 400 &&
-                        el.offsetHeight > 20 && el.offsetHeight < 60 &&
-                        (text.indexOf('手打') !== -1 || text.indexOf('手作') !== -1) &&
-                        text.indexOf('账号') === -1 &&
-                        text.length < 50) {
-                        return text.split('\\n')[0];
+                    // 方法2: 查找 clk-area 元素
+                    var clkArea = document.querySelector('[class*="shopSwitcher"] [class*="clk-area"]');
+                    if (clkArea) {
+                        var shopName = clkArea.querySelector('[class*="shop-name"]');
+                        if (shopName) {
+                            return shopName.innerText.trim();
+                        }
+                        // 从 clk-area 文本中提取
+                        var text = clkArea.innerText.trim();
+                        if (text && (text.indexOf('手打') !== -1 || text.indexOf('手作') !== -1)) {
+                            return text.split('\\n')[0];
+                        }
+                    }
+                    
+                    // 方法3: 遍历顶部栏元素
+                    var allElements = document.querySelectorAll('*');
+                    for (var i = 0; i < allElements.length; i++) {
+                        var el = allElements[i];
+                        var text = (el.innerText || '').trim();
+                        var rect = el.getBoundingClientRect();
+                        var cls = (typeof el.className === 'string') ? el.className : '';
+                        
+                        if (rect.top > 0 && rect.top < 80 && rect.left > 300 &&
+                            el.offsetWidth > 100 && el.offsetWidth < 400 &&
+                            el.offsetHeight > 20 && el.offsetHeight < 60 &&
+                            (text.indexOf('手打') !== -1 || text.indexOf('手作') !== -1) &&
+                            text.indexOf('账号') === -1 &&
+                            text.length < 60) {
+                            return text.split('\\n')[0];
+                        }
+                    }
+                    return '';
+                '''
+                result = self.driver.execute_script(js_get_shop) or ""
+                if result:
+                    return result
+                
+                # 如果没获取到，等待后重试
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+            except:
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+        
+        return ""
+    
+    def get_current_shop_status(self) -> dict:
+        """
+        获取当前门店的营业状态
+        
+        Returns:
+            dict: {
+                'shop_name': str,  # 门店名称
+                'status': str,     # 状态文本（如"营业中"、"已打烊"）
+                'is_open': bool    # 是否营业中
+            }
+        """
+        if not self.driver:
+            return {'shop_name': '', 'status': '', 'is_open': False}
+        
+        try:
+            js_get_status = '''
+                // 查找顶部栏的门店信息区域
+                var result = {shop_name: '', status: '', is_open: false};
+                
+                // 方法1: 查找 shopSwitcher 或顶部栏
+                var switcher = document.querySelector('[class*="shopSwitcher"]');
+                if (switcher) {
+                    var text = switcher.innerText || '';
+                    
+                    // 提取门店名称
+                    var lines = text.split('\\n');
+                    for (var i = 0; i < lines.length; i++) {
+                        var line = lines[i].trim();
+                        if (line.indexOf('手打') !== -1 || line.indexOf('手作') !== -1) {
+                            result.shop_name = line;
+                            break;
+                        }
+                    }
+                    
+                    // 检查营业状态
+                    if (text.indexOf('营业中') !== -1) {
+                        result.status = '营业中';
+                        result.is_open = true;
+                    } else if (text.indexOf('已打烊') !== -1) {
+                        result.status = '已打烊';
+                        result.is_open = false;
+                    } else if (text.indexOf('休息中') !== -1) {
+                        result.status = '休息中';
+                        result.is_open = false;
+                    }
+                    
+                    return result;
+                }
+                
+                // 方法2: 查找顶部栏中的状态元素
+                var topBar = document.querySelector('[class*="toolBar"], [class*="header"], [class*="rightBlock"]');
+                if (topBar) {
+                    var text = topBar.innerText || '';
+                    
+                    if (text.indexOf('营业中') !== -1) {
+                        result.status = '营业中';
+                        result.is_open = true;
+                    } else if (text.indexOf('已打烊') !== -1) {
+                        result.status = '已打烊';
+                        result.is_open = false;
+                    } else if (text.indexOf('休息中') !== -1) {
+                        result.status = '休息中';
+                        result.is_open = false;
                     }
                 }
-                return '';
+                
+                return result;
             '''
-            return self.driver.execute_script(js_get_shop) or ""
-        except:
-            return ""
+            return self.driver.execute_script(js_get_status) or {'shop_name': '', 'status': '', 'is_open': False}
+        except Exception as e:
+            return {'shop_name': '', 'status': '', 'is_open': False}
     
     def _click_menu_item(self, menu_name: str) -> bool:
         """点击左侧菜单项"""
@@ -1701,26 +1911,22 @@ class SeleniumGoodsFetcher:
         lines.append(f"⏰ {now}")
         lines.append("")
         
-        # 已下架商品
+        # 已下架商品（显示全部）
         if off_sale_goods:
             lines.append(f"🔻 已下架 ({off_count})")
             lines.append("─" * 16)
-            for i, g in enumerate(off_sale_goods[:8], 1):
-                name = g.goods_name[:12] + "..." if len(g.goods_name) > 12 else g.goods_name
+            for i, g in enumerate(off_sale_goods, 1):
+                name = g.goods_name[:15] + "..." if len(g.goods_name) > 15 else g.goods_name
                 lines.append(f"  {i}. {name}")
-            if off_count > 8:
-                lines.append(f"  ... 等{off_count}个商品")
             lines.append("")
         
-        # 已售罄商品
+        # 已售罄商品（显示全部）
         if sold_out_goods:
             lines.append(f"🔴 已售罄 ({sold_count})")
             lines.append("─" * 16)
-            for i, g in enumerate(sold_out_goods[:8], 1):
-                name = g.goods_name[:12] + "..." if len(g.goods_name) > 12 else g.goods_name
+            for i, g in enumerate(sold_out_goods, 1):
+                name = g.goods_name[:15] + "..." if len(g.goods_name) > 15 else g.goods_name
                 lines.append(f"  {i}. {name}")
-            if sold_count > 8:
-                lines.append(f"  ... 等{sold_count}个商品")
             lines.append("")
         
         # 底部统计
@@ -1767,20 +1973,16 @@ class SeleniumGoodsFetcher:
         
         if off_sale_goods:
             md_lines.append(f"**🔻 已下架 ({off_count}个)**")
-            for i, g in enumerate(off_sale_goods[:6], 1):
-                name = g.goods_name[:15] + "..." if len(g.goods_name) > 15 else g.goods_name
+            for i, g in enumerate(off_sale_goods, 1):
+                name = g.goods_name[:18] + "..." if len(g.goods_name) > 18 else g.goods_name
                 md_lines.append(f"> {i}. {name}")
-            if off_count > 6:
-                md_lines.append(f"> ... 共{off_count}个")
             md_lines.append("")
         
         if sold_out_goods:
             md_lines.append(f"**🔴 已售罄 ({sold_count}个)**")
-            for i, g in enumerate(sold_out_goods[:6], 1):
-                name = g.goods_name[:15] + "..." if len(g.goods_name) > 15 else g.goods_name
+            for i, g in enumerate(sold_out_goods, 1):
+                name = g.goods_name[:18] + "..." if len(g.goods_name) > 18 else g.goods_name
                 md_lines.append(f"> {i}. <font color=\"warning\">{name}</font>")
-            if sold_count > 6:
-                md_lines.append(f"> ... 共{sold_count}个")
             md_lines.append("")
         
         md_lines.append(f"---")
