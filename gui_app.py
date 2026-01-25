@@ -154,6 +154,19 @@ class MonitorWorker(QThread):
                 if self.running:
                     self.log(msg)
             
+            # 初始化Selenium驱动（多门店模式也需要）
+            if not self.running: return
+            self.log("正在初始化Selenium驱动...")
+            if not self.fetcher._init_driver():
+                self.error_signal.emit(
+                    "无法初始化浏览器驱动！\n\n"
+                    "请尝试：\n"
+                    "1. 关闭所有浏览器窗口后重试\n"
+                    "2. 检查是否有其他程序占用端口9222"
+                )
+                return
+            self.log("✓ Selenium驱动初始化成功")
+            
             # ========== 多门店监控模式 ==========
             if self.shops:
                 self._run_multi_shop_monitor(log_callback)
@@ -180,6 +193,26 @@ class MonitorWorker(QThread):
             'total_sold_out': 0,
             'shop_results': []
         }
+        
+        # 等待用户登录
+        self.log("检查登录状态...")
+        login_wait_start = time.time()
+        login_timeout = 30 * 60  # 30分钟超时
+        
+        while self.running and self.fetcher._need_login():
+            elapsed = time.time() - login_wait_start
+            if elapsed > login_timeout:
+                self.error_signal.emit("登录超时，请重新启动监控")
+                return
+            
+            if elapsed < 5 or int(elapsed) % 30 == 0:  # 每30秒提示一次
+                self.log(f"⏳ 请在浏览器中登录商家后台... (已等待 {int(elapsed)}秒)")
+            time.sleep(2)
+        
+        if not self.running:
+            return
+        
+        self.log("✓ 登录状态正常")
         
         self.log(f"")
         self.log(f"{'='*50}")
