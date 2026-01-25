@@ -57,28 +57,49 @@ class ShopManager:
             import pandas as pd
             df = pd.read_excel(path)
             
-            # 检查必要的列
-            required_cols = ['店铺名称', 'WebHook']
-            for col in required_cols:
-                if col not in df.columns:
-                    print(f"Excel缺少必要列: {col}")
-                    return False
+            # 兼容多种列名
+            name_col = None
+            webhook_col = None
+            
+            # 查找门店名称列（兼容"店铺名称"和"门店名称"）
+            for col in ['店铺名称', '门店名称', '名称', 'name']:
+                if col in df.columns:
+                    name_col = col
+                    break
+            
+            # 查找WebHook列（兼容大小写）
+            for col in ['WebHook', 'webhook', 'Webhook', 'WEBHOOK']:
+                if col in df.columns:
+                    webhook_col = col
+                    break
+            
+            if not name_col:
+                print(f"Excel缺少必要列: 店铺名称/门店名称，当前列: {df.columns.tolist()}")
+                return False
+            if not webhook_col:
+                print(f"Excel缺少必要列: WebHook，当前列: {df.columns.tolist()}")
+                return False
             
             self.shops = []
             for _, row in df.iterrows():
-                name = str(row['店铺名称']).strip()
-                webhook = str(row['WebHook']).strip()
+                name = str(row[name_col]).strip()
+                webhook = str(row[webhook_col]).strip()
                 
-                if name and webhook and webhook.startswith('http'):
-                    enabled = True
-                    if '启用' in df.columns:
-                        enabled = bool(row.get('启用', True))
-                    
-                    self.shops.append(ShopInfo(
-                        name=name,
-                        webhook=webhook,
-                        enabled=enabled
-                    ))
+                # 过滤空行和无效数据（nan、空字符串等）
+                if not name or name.lower() == 'nan':
+                    continue
+                if not webhook or webhook.lower() == 'nan' or not webhook.startswith('http'):
+                    continue
+                
+                enabled = True
+                if '启用' in df.columns:
+                    enabled = bool(row.get('启用', True))
+                
+                self.shops.append(ShopInfo(
+                    name=name,
+                    webhook=webhook,
+                    enabled=enabled
+                ))
             
             print(f"成功加载 {len(self.shops)} 个店铺配置")
             return True

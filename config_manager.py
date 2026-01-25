@@ -64,6 +64,11 @@ class AppConfig:
     debug_port: int = 9222
     browser_path: str = ""
     headless: bool = False
+    
+    # 门店列表配置
+    shop_list_file: str = "doc/门店列表_v2.xlsx"  # 当前门店列表文件
+    shop_list_last_update: str = ""  # 上一次更新时间
+    shop_list_history: str = ""  # 历史记录（JSON格式）
 
 
 class ConfigManager:

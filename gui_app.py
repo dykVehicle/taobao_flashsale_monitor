@@ -191,7 +191,8 @@ class MonitorWorker(QThread):
             'shops_skipped': 0,
             'total_off_sale': 0,
             'total_sold_out': 0,
-            'shop_results': []
+            'shop_results': [],
+            'skipped_shops': []  # 记录跳过的门店详情
         }
         
         # 等待用户登录
@@ -237,28 +238,47 @@ class MonitorWorker(QThread):
                 break
             
             progress = 30 + int((idx / total_shops) * 60)
+            # 简化店名
+            short_name = simplify_shop_name(shop.name)
+            
             self.progress_signal.emit(progress)
-            self.status_signal.emit(f"监控中: {shop.name} ({idx+1}/{total_shops})")
+            self.status_signal.emit(f"监控中: {short_name} ({idx+1}/{total_shops})")
             
             self.log(f"")
             self.log(f"┌{'─'*48}┐")
-            self.log(f"│ [{idx+1}/{total_shops}] 正在监控: {shop.name}")
+            self.log(f"│ [{idx+1}/{total_shops}] 正在监控: {short_name}")
             self.log(f"└{'─'*48}┘")
             
-            # 切换门店
-            self.log(f"   🔄 开始切换到门店: {shop.name}")
+            # 切换门店（使用完整名称搜索）
+            self.log(f"   🔄 开始切换到门店: {short_name}")
             switch_result = self.fetcher.switch_shop(shop.name)
             
             if not switch_result['success']:
+                reason = switch_result.get('message', '未知原因')
                 if not switch_result['is_open']:
-                    self.log(f"   ⏸ 门店未营业，跳过: {switch_result.get('message', '')}")
-                    all_results['shops_skipped'] += 1
+                    self.log(f"   ⏸ 门店未营业，跳过: {reason}")
+                    all_results['skipped_shops'].append({
+                        'name': shop.name,
+                        'short_name': short_name,
+                        'reason': reason,
+                        'status': '未营业'
+                    })
                 else:
-                    self.log(f"   ✗ 切换门店失败: {switch_result.get('message', '')}")
-                    all_results['shops_skipped'] += 1
+                    self.log(f"   ✗ 切换门店失败: {reason}")
+                    all_results['skipped_shops'].append({
+                        'name': shop.name,
+                        'short_name': short_name,
+                        'reason': reason,
+                        'status': '切换失败'
+                    })
+                all_results['shops_skipped'] += 1
                 continue
             
-            self.log(f"   ✓ 门店切换成功: {switch_result.get('shop_name', '')}")
+            actual_shop_name = switch_result.get('shop_name', shop.name)
+            self.log(f"   ✓ 门店切换成功: {actual_shop_name}")
+            
+            # 获取营业状态
+            shop_status = "营业中"  # 能走到这里的都是营业中
             
             # 等待页面加载
             time.sleep(3)
@@ -278,6 +298,9 @@ class MonitorWorker(QThread):
                 
                 shop_result = {
                     'shop': shop,
+                    'shop_name': actual_shop_name,  # 保存实际门店名称
+                    'short_name': short_name,  # 保存简化名称
+                    'shop_status': shop_status,  # 保存营业状态
                     'off_sale': off_sale,
                     'sold_out': sold_out,
                     'total': len(goods_list),
@@ -291,9 +314,9 @@ class MonitorWorker(QThread):
                 
                 self.log(f"   ✓ 抓取完成: 下架 {len(off_sale)} 个, 售罄 {len(sold_out)} 个")
                 
-                # 发送单店通知
+                # 发送单店通知（包含营业状态）
                 if (len(off_sale) > 0 or len(sold_out) > 0) and shop.webhook:
-                    self._send_shop_notification(shop, off_sale, sold_out)
+                    self._send_shop_notification(shop, off_sale, sold_out, shop_status)
                 
                 # 发送单店结果信号
                 self.shop_result_signal.emit(shop_result)
@@ -306,17 +329,36 @@ class MonitorWorker(QThread):
         if self.running:
             self.log(f"")
             self.log(f"{'='*50}")
-            self.log(f"多门店监控完成！")
-            self.log(f"  监控成功: {all_results['shops_monitored']} 个门店")
-            self.log(f"  跳过: {all_results['shops_skipped']} 个门店")
-            self.log(f"  总计下架: {all_results['total_off_sale']} 个商品")
-            self.log(f"  总计售罄: {all_results['total_sold_out']} 个商品")
+            self.log(f"📊 多门店监控完成！")
+            self.log(f"  ✓ 监控成功: {all_results['shops_monitored']} 个门店")
+            self.log(f"  ⏸ 跳过: {all_results['shops_skipped']} 个门店")
+            self.log(f"  🔻 总计下架: {all_results['total_off_sale']} 个商品")
+            self.log(f"  🔴 总计售罄: {all_results['total_sold_out']} 个商品")
+            
+            # 显示成功监控的门店
+            if all_results['shop_results']:
+                self.log(f"")
+                self.log(f"✅ 成功监控的门店:")
+                for sr in all_results['shop_results']:
+                    short_name = sr.get('short_name', simplify_shop_name(sr.get('shop_name', '')))
+                    off_count = len(sr.get('off_sale', []))
+                    sold_count = len(sr.get('sold_out', []))
+                    self.log(f"   • {short_name}: 下架{off_count}/售罄{sold_count}")
+            
+            # 显示跳过的门店详情
+            if all_results['skipped_shops']:
+                self.log(f"")
+                self.log(f"⏸ 跳过的门店列表:")
+                for skip in all_results['skipped_shops']:
+                    short_name = skip.get('short_name', simplify_shop_name(skip['name']))
+                    self.log(f"   • {short_name} [{skip['status']}] - {skip['reason']}")
+            
             self.log(f"{'='*50}")
             
             self.progress_signal.emit(100)
             self.status_signal.emit("完成")
             
-            # 发送完成信号
+            # 发送完成信号（包含 default_webhook 用于发送总结）
             self.finished_signal.emit({
                 'off_sale': [],
                 'sold_out': [],
@@ -357,20 +399,20 @@ class MonitorWorker(QThread):
             self.status_signal.emit("完成")
             self.finished_signal.emit(result)
     
-    def _send_shop_notification(self, shop: ShopInfo, off_sale_list, sold_out_list):
+    def _send_shop_notification(self, shop: ShopInfo, off_sale_list, sold_out_list, shop_status: str = "营业中"):
         """发送单店通知"""
         import requests
         from selenium_fetcher import SeleniumGoodsFetcher
         
         try:
-            # 生成消息
+            # 生成消息（包含营业状态）
             try:
                 msg_body = SeleniumGoodsFetcher.format_wecom_markdown(
-                    shop.name, off_sale_list, sold_out_list
+                    shop.name, off_sale_list, sold_out_list, shop_status
                 )
             except:
                 text_msg = SeleniumGoodsFetcher.format_wecom_message(
-                    shop.name, off_sale_list, sold_out_list
+                    shop.name, off_sale_list, sold_out_list, shop_status=shop_status
                 )
                 msg_body = {"msgtype": "text", "text": {"content": text_msg}}
             
@@ -535,6 +577,26 @@ class MonitorWorker(QThread):
             except:
                 pass
             self.fetcher = None
+
+
+def simplify_shop_name(full_name: str) -> str:
+    """
+    简化门店名称，提取括号内的店名
+    例如：阿狗手打·手作黑糖珍珠奶茶(松江樱花广场店) -> 松江樱花广场店
+    """
+    if '(' in full_name and ')' in full_name:
+        # 提取最后一对括号中的内容
+        start = full_name.rfind('(')
+        end = full_name.rfind(')')
+        if start < end:
+            return full_name[start+1:end]
+    elif '（' in full_name and '）' in full_name:
+        # 中文括号
+        start = full_name.rfind('（')
+        end = full_name.rfind('）')
+        if start < end:
+            return full_name[start+1:end]
+    return full_name
 
 
 class MainWindow(QMainWindow):
@@ -786,45 +848,41 @@ class MainWindow(QMainWindow):
         multi_shop_group = QGroupBox("🏪 多门店监控配置")
         multi_shop_layout = QVBoxLayout(multi_shop_group)
         multi_shop_layout.setContentsMargins(20, 25, 20, 20)
+        multi_shop_layout.setSpacing(10)
         
-        # 门店列表文件选择
+        # 门店列表文件选择（第一行：文件输入 + 选择按钮 + 加载按钮）
         shop_file_layout = QHBoxLayout()
         self.shop_file_input = QLineEdit()
         self.shop_file_input.setPlaceholderText("选择门店列表文件 (Excel/JSON)")
-        self.shop_file_input.setText("doc/店铺列表.xlsx")
+        self.shop_file_input.setText("doc/门店列表_v2.xlsx")
         shop_file_btn = QPushButton("选择")
         shop_file_btn.setObjectName("secondaryBtn")
-        shop_file_btn.setFixedWidth(70)
+        shop_file_btn.setFixedWidth(60)
         shop_file_btn.clicked.connect(self.select_shop_file)
+        load_shops_btn = QPushButton("加载")
+        load_shops_btn.setObjectName("secondaryBtn")
+        load_shops_btn.setFixedWidth(60)
+        load_shops_btn.clicked.connect(self._load_shop_list)
         shop_file_layout.addWidget(self.shop_file_input)
         shop_file_layout.addWidget(shop_file_btn)
+        shop_file_layout.addWidget(load_shops_btn)
         multi_shop_layout.addLayout(shop_file_layout)
         
-        # 加载和刷新按钮
-        btn_layout = QHBoxLayout()
-        load_shops_btn = QPushButton("📥 加载门店列表")
-        load_shops_btn.setObjectName("secondaryBtn")
-        load_shops_btn.clicked.connect(self._load_shop_list)
-        btn_layout.addWidget(load_shops_btn)
-        btn_layout.addStretch()
-        multi_shop_layout.addLayout(btn_layout)
-        
-        # 门店数量显示
+        # 门店数量和启用checkbox（同一行）
+        info_layout = QHBoxLayout()
         self.shop_count_label = QLabel("已加载: 0 个门店")
         self.shop_count_label.setStyleSheet("color: #7f8fa6; font-size: 12px;")
-        multi_shop_layout.addWidget(self.shop_count_label)
-        
-        # 门店列表预览
-        self.shop_list_text = QTextEdit()
-        self.shop_list_text.setReadOnly(True)
-        self.shop_list_text.setMaximumHeight(120)
-        self.shop_list_text.setPlaceholderText("门店列表预览...")
-        multi_shop_layout.addWidget(self.shop_list_text)
-        
-        # 启用多门店监控
+        info_layout.addWidget(self.shop_count_label)
+        info_layout.addStretch()
         self.multi_shop_checkbox = QCheckBox("启用多门店监控模式")
         self.multi_shop_checkbox.setChecked(True)
-        multi_shop_layout.addWidget(self.multi_shop_checkbox)
+        info_layout.addWidget(self.multi_shop_checkbox)
+        multi_shop_layout.addLayout(info_layout)
+        
+        # 门店列表预览（隐藏的，用于存储数据）
+        self.shop_list_text = QTextEdit()
+        self.shop_list_text.setReadOnly(True)
+        self.shop_list_text.setVisible(False)  # 隐藏预览框，避免布局干涉
         
         shop_layout.addWidget(multi_shop_group)
         
@@ -1171,10 +1229,15 @@ class MainWindow(QMainWindow):
             total_sold_out = all_results.get('total_sold_out', 0)
             shops_monitored = all_results.get('shops_monitored', 0)
             shops_skipped = all_results.get('shops_skipped', 0)
+            skipped_shops = all_results.get('skipped_shops', [])
             
             self.off_sale_label.setText(f"已下架: {total_off_sale}")
             self.sold_out_label.setText(f"已售罄: {total_sold_out}")
             self.total_label.setText(f"门店: {shops_monitored}/{shops_monitored + shops_skipped}")
+            
+            # 发送监控总结到默认 webhook（单店模式使用的 webhook）
+            if self.config.enable_notification and self.config.wecom_webhook:
+                self._send_multi_shop_summary(all_results)
             
             self.log("")
             self.log("=" * 50)
@@ -1288,6 +1351,91 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(f"✗ 发送企业微信通知出错: {e}")
     
+    def _send_multi_shop_summary(self, all_results: dict):
+        """发送多门店监控总结到默认 webhook"""
+        import requests
+        from datetime import datetime
+        
+        try:
+            now = datetime.now().strftime("%m-%d %H:%M")
+            shops_monitored = all_results.get('shops_monitored', 0)
+            shops_skipped = all_results.get('shops_skipped', 0)
+            total_off_sale = all_results.get('total_off_sale', 0)
+            total_sold_out = all_results.get('total_sold_out', 0)
+            skipped_shops = all_results.get('skipped_shops', [])
+            shop_results = all_results.get('shop_results', [])
+            
+            total_shops = shops_monitored + shops_skipped
+            
+            # 构建 Markdown 消息
+            md_lines = []
+            md_lines.append(f"### 📊 多门店监控总结")
+            md_lines.append(f"> 时间：{now}")
+            md_lines.append(f"> 门店数：{shops_monitored}/{total_shops}")
+            md_lines.append("")
+            
+            # 统计信息
+            md_lines.append(f"**📈 监控统计**")
+            md_lines.append(f"> ✅ 成功监控：{shops_monitored} 个门店")
+            md_lines.append(f"> ⏸ 跳过：{shops_skipped} 个门店")
+            md_lines.append(f"> 🔻 总下架：{total_off_sale} 个商品")
+            md_lines.append(f"> 🔴 总售罄：{total_sold_out} 个商品")
+            md_lines.append("")
+            
+            # 成功监控的门店
+            if shop_results:
+                md_lines.append(f"**✅ 成功监控的门店**")
+                for sr in shop_results:
+                    off_count = len(sr.get('off_sale', []))
+                    sold_count = len(sr.get('sold_out', []))
+                    short_name = sr.get('short_name', '')
+                    if not short_name:
+                        shop = sr.get('shop')
+                        shop_name = shop.name if shop else sr.get('shop_name', '未知')
+                        short_name = simplify_shop_name(shop_name)
+                    md_lines.append(f"> • {short_name}: 下架{off_count}/售罄{sold_count}")
+                md_lines.append("")
+            
+            # 跳过的门店
+            if skipped_shops:
+                md_lines.append(f"**⏸ 跳过的门店**")
+                for skip in skipped_shops:
+                    short_name = skip.get('short_name', '')
+                    if not short_name:
+                        short_name = simplify_shop_name(skip.get('name', '未知'))
+                    reason = skip.get('reason', '')
+                    status = skip.get('status', '')
+                    md_lines.append(f"> • <font color=\"warning\">{short_name}</font>")
+                    md_lines.append(f">   {status}: {reason}")
+                md_lines.append("")
+            
+            md_lines.append(f"---")
+            md_lines.append(f"💡 监控完成 | 详情请查看各门店通知")
+            
+            msg_body = {
+                "msgtype": "markdown",
+                "markdown": {"content": "\n".join(md_lines)}
+            }
+            
+            # 发送请求
+            resp = requests.post(
+                self.config.wecom_webhook,
+                json=msg_body,
+                timeout=10
+            )
+            
+            if resp.status_code == 200:
+                result = resp.json()
+                if result.get("errcode") == 0:
+                    self.log("✓ 多门店监控总结已发送到默认 webhook")
+                else:
+                    self.log(f"✗ 总结发送失败: {result.get('errmsg')}")
+            else:
+                self.log(f"✗ 总结发送失败: HTTP {resp.status_code}")
+                
+        except Exception as e:
+            self.log(f"✗ 发送监控总结出错: {e}")
+    
     def on_monitor_error(self, error: str):
         """监控出错"""
         self.start_btn.setEnabled(True)
@@ -1323,20 +1471,56 @@ class MainWindow(QMainWindow):
             shops = self.shop_manager.shops
             self.shop_count_label.setText(f"已加载: {len(shops)} 个门店")
             
-            # 显示门店列表预览
+            # 显示门店列表预览（使用简化店名）
             preview_lines = []
             for i, shop in enumerate(shops[:10]):  # 只显示前10个
                 status = "✓" if shop.enabled else "✗"
-                preview_lines.append(f"{status} {shop.name}")
+                short_name = simplify_shop_name(shop.name)
+                preview_lines.append(f"{status} {short_name}")
             if len(shops) > 10:
                 preview_lines.append(f"... 共 {len(shops)} 个门店")
             self.shop_list_text.setText("\n".join(preview_lines))
             
-            self.log(f"✓ 已加载 {len(shops)} 个门店配置")
+            # 在日志中打印简化的门店列表
+            self.log(f"✓ 已加载 {len(shops)} 个门店:")
+            for shop in shops:
+                short_name = simplify_shop_name(shop.name)
+                self.log(f"   • {short_name}")
+            
+            # 记录门店列表更新
+            from datetime import datetime
+            import json
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            old_file = self.config.shop_list_file
+            old_time = self.config.shop_list_last_update
+            
+            # 保存历史记录
+            try:
+                history = json.loads(self.config.shop_list_history) if self.config.shop_list_history else []
+            except:
+                history = []
+            
+            if old_file and old_time and old_file != self.shop_file_input.text():
+                history.append({
+                    'file': old_file,
+                    'time': old_time,
+                    'shops': len(shops)
+                })
+                # 只保留最近5条历史
+                history = history[-5:]
+                self.config.shop_list_history = json.dumps(history, ensure_ascii=False)
+            
+            # 更新当前配置
+            self.config.shop_list_file = self.shop_file_input.text()
+            self.config.shop_list_last_update = now
+            self.config_manager.save()
+            
+            if old_file and old_file != self.shop_file_input.text():
+                self.log(f"   上一次: {old_file} ({old_time})")
         else:
             self.shop_count_label.setText("加载失败")
-            self.shop_list_text.setText("加载门店列表失败，请检查文件格式")
-            self.log("✗ 加载门店列表失败")
+            self.shop_list_text.setText(f"✗ 加载门店列表失败,{os.path.basename(shop_file)}")
+            self.log(f"✗ 加载门店列表失败: {shop_file}")
     
     def select_shop_file(self):
         """选择门店列表文件"""

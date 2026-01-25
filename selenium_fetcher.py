@@ -1877,7 +1877,8 @@ class SeleniumGoodsFetcher:
         shop_name: str,
         off_sale_goods: List[GoodsItem],
         sold_out_goods: List[GoodsItem],
-        style: str = "elegant"
+        style: str = "elegant",
+        shop_status: str = "营业中",  # 新增：门店营业状态
     ) -> str:
         """
         格式化精美的企业微信机器人消息
@@ -1887,6 +1888,7 @@ class SeleniumGoodsFetcher:
             off_sale_goods: 已下架商品列表
             sold_out_goods: 已售罄商品列表
             style: 风格 ("elegant"=精简优雅, "detailed"=详细)
+            shop_status: 门店营业状态（营业中/已打烊等）
         
         Returns:
             格式化后的消息文本
@@ -1900,7 +1902,7 @@ class SeleniumGoodsFetcher:
         
         # 如果没有异常商品
         if total == 0:
-            return f"✅ 【{shop_name}】\n⏰ {now}\n\n商品状态正常，无异常商品 👍"
+            return f"✅ 【{shop_name}】\n🏪 {shop_status}\n⏰ {now}\n\n商品状态正常，无异常商品 👍"
         
         # 精简风格的消息
         lines = []
@@ -1908,6 +1910,7 @@ class SeleniumGoodsFetcher:
         # 标题区
         lines.append(f"⚠️ 【商品异常提醒】")
         lines.append(f"📍 {shop_name}")
+        lines.append(f"🏪 {shop_status}")
         lines.append(f"⏰ {now}")
         lines.append("")
         
@@ -1941,9 +1944,16 @@ class SeleniumGoodsFetcher:
         shop_name: str,
         off_sale_goods: List[GoodsItem],
         sold_out_goods: List[GoodsItem],
+        shop_status: str = "营业中",  # 新增：门店营业状态
     ) -> dict:
         """
         格式化企业微信 Markdown 格式消息（更精美）
+        
+        Args:
+            shop_name: 门店名称
+            off_sale_goods: 已下架商品列表
+            sold_out_goods: 已售罄商品列表
+            shop_status: 门店营业状态（营业中/已打烊等）
         
         Returns:
             企业微信机器人消息体 dict
@@ -1954,9 +1964,13 @@ class SeleniumGoodsFetcher:
         sold_count = len(sold_out_goods)
         total = off_count + sold_count
         
+        # 营业状态颜色
+        status_color = "info" if shop_status == "营业中" else "warning"
+        
         if total == 0:
             content = f"### ✅ 商品状态正常\n" \
                       f"> 门店：{shop_name}\n" \
+                      f"> 状态：<font color=\"{status_color}\">{shop_status}</font>\n" \
                       f"> 时间：{now}\n\n" \
                       f"无异常商品，一切正常 👍"
             return {
@@ -1968,6 +1982,7 @@ class SeleniumGoodsFetcher:
         md_lines = []
         md_lines.append(f"### ⚠️ 商品异常提醒")
         md_lines.append(f"> 门店：<font color=\"info\">{shop_name}</font>")
+        md_lines.append(f"> 状态：<font color=\"{status_color}\">{shop_status}</font>")
         md_lines.append(f"> 时间：{now}")
         md_lines.append("")
         
