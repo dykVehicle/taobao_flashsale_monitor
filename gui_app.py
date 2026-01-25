@@ -101,8 +101,8 @@ class MonitorWorker(QThread):
             
             if not self.running: return
             
-            # 启动浏览器
-            open_url = f"{self.config.base_url}/app/chain/{self.config.chain_id}/shop#app.chainshop.shop"
+            # 启动浏览器 - 正确的商品管理页面URL
+            open_url = f"{self.config.base_url}/app/shop/{self.config.shop_id}/food#app.shop.food?path=management"
             self.log("正在查找浏览器...")
             self.progress_signal.emit(20)
             
@@ -152,13 +152,16 @@ class MonitorWorker(QThread):
             self.status_signal.emit("抓取中...")
             self.progress_signal.emit(50)
             
-            # 传递 running 标志给 fetcher（如果支持的话，需要修改 fetcher）
-            # 目前只能在耗时操作后检查
+            # 传递日志回调给 fetcher
+            def log_callback(msg):
+                if self.running:
+                    self.log(msg)
             
             goods_list = self.fetcher.login_and_fetch(
                 auto_login=False,
                 wait_for_login=True,
                 login_timeout=30 * 60,
+                log_callback=log_callback,
             )
             
             if not self.running: return
@@ -899,16 +902,111 @@ class MainWindow(QMainWindow):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         
-        off_sale = len(result.get("off_sale", []))
-        sold_out = len(result.get("sold_out", []))
+        off_sale_list = result.get("off_sale", [])
+        sold_out_list = result.get("sold_out", [])
+        off_sale = len(off_sale_list)
+        sold_out = len(sold_out_list)
         total = result.get("total", 0)
         
         self.off_sale_label.setText(f"已下架: {off_sale}")
         self.sold_out_label.setText(f"已售罄: {sold_out}")
         self.total_label.setText(f"总计: {total}")
         
+        # 在日志中显示企业微信消息预览
+        if off_sale > 0 or sold_out > 0:
+            self.log("")
+            self.log("┌─────────────────────────────────────────┐")
+            self.log("│     📱 企业微信通知消息预览              │")
+            self.log("└─────────────────────────────────────────┘")
+            self.preview_wecom_message(off_sale_list, sold_out_list)
+            self.log("")
+        
+        # 如果启用了通知，发送企业微信消息
+        if (off_sale > 0 or sold_out > 0) and self.config.enable_notification and self.config.wecom_webhook:
+            self.send_wecom_notification(off_sale_list, sold_out_list)
+        elif off_sale == 0 and sold_out == 0:
+            self.log("✅ 商品状态正常，无异常商品")
+        
         self.log("=" * 50)
         self.statusBar().showMessage("监控完成")
+    
+    def preview_wecom_message(self, off_sale_list, sold_out_list):
+        """在日志中预览企业微信消息"""
+        from selenium_fetcher import SeleniumGoodsFetcher
+        from datetime import datetime
+        
+        shop_name = self.config.shop_name or "未设置门店名"
+        now = datetime.now().strftime("%m-%d %H:%M")
+        off_count = len(off_sale_list)
+        sold_count = len(sold_out_list)
+        
+        self.log(f"⚠️ 【商品异常提醒】")
+        self.log(f"📍 {shop_name}")
+        self.log(f"⏰ {now}")
+        self.log("")
+        
+        if off_sale_list:
+            self.log(f"🔻 已下架 ({off_count})")
+            self.log("─" * 20)
+            for i, g in enumerate(off_sale_list[:8], 1):
+                name = g.goods_name[:15] + "..." if len(g.goods_name) > 15 else g.goods_name
+                self.log(f"  {i}. {name}")
+            if off_count > 8:
+                self.log(f"  ... 等{off_count}个商品")
+            self.log("")
+        
+        if sold_out_list:
+            self.log(f"🔴 已售罄 ({sold_count})")
+            self.log("─" * 20)
+            for i, g in enumerate(sold_out_list[:8], 1):
+                name = g.goods_name[:15] + "..." if len(g.goods_name) > 15 else g.goods_name
+                self.log(f"  {i}. {name}")
+            if sold_count > 8:
+                self.log(f"  ... 等{sold_count}个商品")
+            self.log("")
+        
+        self.log("─" * 20)
+        self.log(f"📊 共 {off_count + sold_count} 个异常商品")
+        self.log("💡 请及时处理")
+    
+    def send_wecom_notification(self, off_sale_list, sold_out_list):
+        """发送企业微信通知"""
+        import requests
+        from selenium_fetcher import SeleniumGoodsFetcher
+        
+        try:
+            shop_name = self.config.shop_name or "未设置门店名"
+            
+            # 生成精美消息（尝试 Markdown，如果失败则用文本）
+            try:
+                msg_body = SeleniumGoodsFetcher.format_wecom_markdown(
+                    shop_name, off_sale_list, sold_out_list
+                )
+            except:
+                # 降级为纯文本
+                text_msg = SeleniumGoodsFetcher.format_wecom_message(
+                    shop_name, off_sale_list, sold_out_list
+                )
+                msg_body = {"msgtype": "text", "text": {"content": text_msg}}
+            
+            # 发送请求
+            resp = requests.post(
+                self.config.wecom_webhook,
+                json=msg_body,
+                timeout=10
+            )
+            
+            if resp.status_code == 200:
+                result = resp.json()
+                if result.get("errcode") == 0:
+                    self.log("✓ 企业微信通知发送成功！")
+                else:
+                    self.log(f"✗ 企业微信通知发送失败: {result.get('errmsg')}")
+            else:
+                self.log(f"✗ 企业微信通知发送失败: HTTP {resp.status_code}")
+                
+        except Exception as e:
+            self.log(f"✗ 发送企业微信通知出错: {e}")
     
     def on_monitor_error(self, error: str):
         """监控出错"""
