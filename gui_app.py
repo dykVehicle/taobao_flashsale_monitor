@@ -67,12 +67,13 @@ class MonitorWorker(QThread):
     shop_result_signal = pyqtSignal(dict)  # 单个门店结果信号
     
     def __init__(self, config: AppConfig, profile_dir: str, auto_fill_login: bool = False, 
-                 shops: List[ShopInfo] = None):
+                 shops: List[ShopInfo] = None, check_interval: int = 30):
         super().__init__()
         self.config = config
         self.profile_dir = profile_dir
         self.auto_fill_login = auto_fill_login
         self.shops = shops or []  # 门店列表
+        self.check_interval = check_interval  # 监控间隔（分钟）
         self.running = True
         self.fetcher = None
         self._is_cleaning_up = False
@@ -167,12 +168,52 @@ class MonitorWorker(QThread):
                 return
             self.log("✓ Selenium驱动初始化成功")
             
-            # ========== 多门店监控模式 ==========
-            if self.shops:
-                self._run_multi_shop_monitor(log_callback)
-            else:
-                # 单店铺模式（兼容旧逻辑）
-                self._run_single_shop_monitor(log_callback)
+            # ========== 循环监控 ==========
+            round_num = 1
+            while self.running:
+                if round_num > 1:
+                    self.log(f"")
+                    self.log(f"{'='*50}")
+                    self.log(f"🔄 开始第 {round_num} 轮监控")
+                    self.log(f"{'='*50}")
+                
+                # 多门店监控模式
+                if self.shops:
+                    self._run_multi_shop_monitor(log_callback)
+                else:
+                    # 单店铺模式（兼容旧逻辑）
+                    self._run_single_shop_monitor(log_callback)
+                
+                if not self.running:
+                    break
+                
+                # 倒计时等待下一轮
+                interval_seconds = self.check_interval * 60
+                self.log(f"")
+                self.log(f"⏰ 下一轮监控将在 {self.check_interval} 分钟后开始")
+                
+                # 每30秒更新一次倒计时
+                remaining = interval_seconds
+                while remaining > 0 and self.running:
+                    if remaining <= 60:
+                        # 最后一分钟每10秒更新
+                        self.status_signal.emit(f"倒计时: {remaining}秒")
+                        sleep_time = min(10, remaining)
+                    elif remaining <= 300:
+                        # 最后5分钟每分钟更新
+                        mins = remaining // 60
+                        secs = remaining % 60
+                        self.status_signal.emit(f"倒计时: {mins}分{secs}秒")
+                        sleep_time = 30
+                    else:
+                        mins = remaining // 60
+                        self.status_signal.emit(f"倒计时: {mins}分钟")
+                        sleep_time = 60
+                    
+                    time.sleep(sleep_time)
+                    remaining -= sleep_time
+                
+                round_num += 1
             
         except Exception as e:
             if self.running:
@@ -186,13 +227,16 @@ class MonitorWorker(QThread):
     def _run_multi_shop_monitor(self, log_callback):
         """多门店监控"""
         total_shops = len(self.shops)
+        monitor_start_time = time.time()  # 记录总开始时间
+        
         all_results = {
             'shops_monitored': 0,
             'shops_skipped': 0,
             'total_off_sale': 0,
             'total_sold_out': 0,
             'shop_results': [],
-            'skipped_shops': []  # 记录跳过的门店详情
+            'skipped_shops': [],  # 记录跳过的门店详情
+            'total_duration': 0,  # 总耗时
         }
         
         # 等待用户登录
@@ -244,6 +288,8 @@ class MonitorWorker(QThread):
             self.progress_signal.emit(progress)
             self.status_signal.emit(f"监控中: {short_name} ({idx+1}/{total_shops})")
             
+            shop_start_time = time.time()  # 记录单店开始时间
+            
             self.log(f"")
             self.log(f"┌{'─'*48}┐")
             self.log(f"│ [{idx+1}/{total_shops}] 正在监控: {short_name}")
@@ -254,22 +300,25 @@ class MonitorWorker(QThread):
             switch_result = self.fetcher.switch_shop(shop.name)
             
             if not switch_result['success']:
+                shop_duration = time.time() - shop_start_time
                 reason = switch_result.get('message', '未知原因')
                 if not switch_result['is_open']:
-                    self.log(f"   ⏸ 门店未营业，跳过: {reason}")
+                    self.log(f"   ⏸ 门店未营业，跳过: {reason} (耗时 {shop_duration:.1f}秒)")
                     all_results['skipped_shops'].append({
                         'name': shop.name,
                         'short_name': short_name,
                         'reason': reason,
-                        'status': '未营业'
+                        'status': '未营业',
+                        'duration': shop_duration
                     })
                 else:
-                    self.log(f"   ✗ 切换门店失败: {reason}")
+                    self.log(f"   ✗ 切换门店失败: {reason} (耗时 {shop_duration:.1f}秒)")
                     all_results['skipped_shops'].append({
                         'name': shop.name,
                         'short_name': short_name,
                         'reason': reason,
-                        'status': '切换失败'
+                        'status': '切换失败',
+                        'duration': shop_duration
                     })
                 all_results['shops_skipped'] += 1
                 continue
@@ -296,6 +345,8 @@ class MonitorWorker(QThread):
                 off_sale = [g for g in goods_list if g.status == "OFF_SALE"]
                 sold_out = [g for g in goods_list if g.status == "SOLD_OUT"]
                 
+                shop_duration = time.time() - shop_start_time
+                
                 shop_result = {
                     'shop': shop,
                     'shop_name': actual_shop_name,  # 保存实际门店名称
@@ -304,7 +355,8 @@ class MonitorWorker(QThread):
                     'off_sale': off_sale,
                     'sold_out': sold_out,
                     'total': len(goods_list),
-                    'success': True
+                    'success': True,
+                    'duration': shop_duration  # 单店耗时
                 }
                 
                 all_results['shops_monitored'] += 1
@@ -312,7 +364,7 @@ class MonitorWorker(QThread):
                 all_results['total_sold_out'] += len(sold_out)
                 all_results['shop_results'].append(shop_result)
                 
-                self.log(f"   ✓ 抓取完成: 下架 {len(off_sale)} 个, 售罄 {len(sold_out)} 个")
+                self.log(f"   ✓ 抓取完成: 下架 {len(off_sale)} 个, 售罄 {len(sold_out)} 个 (耗时 {shop_duration:.1f}秒)")
                 
                 # 发送单店通知（包含营业状态）
                 if (len(off_sale) > 0 or len(sold_out) > 0) and shop.webhook:
@@ -327,15 +379,25 @@ class MonitorWorker(QThread):
         
         # 完成
         if self.running:
+            total_duration = time.time() - monitor_start_time
+            all_results['total_duration'] = total_duration
+            
+            # 格式化总耗时
+            if total_duration >= 60:
+                duration_str = f"{int(total_duration // 60)}分{int(total_duration % 60)}秒"
+            else:
+                duration_str = f"{total_duration:.1f}秒"
+            
             self.log(f"")
             self.log(f"{'='*50}")
             self.log(f"📊 多门店监控完成！")
+            self.log(f"  ⏱ 总耗时: {duration_str}")
             self.log(f"  ✓ 监控成功: {all_results['shops_monitored']} 个门店")
             self.log(f"  ⏸ 跳过: {all_results['shops_skipped']} 个门店")
             self.log(f"  🔻 总计下架: {all_results['total_off_sale']} 个商品")
             self.log(f"  🔴 总计售罄: {all_results['total_sold_out']} 个商品")
             
-            # 显示成功监控的门店
+            # 显示成功监控的门店（带耗时）
             if all_results['shop_results']:
                 self.log(f"")
                 self.log(f"✅ 成功监控的门店:")
@@ -343,15 +405,17 @@ class MonitorWorker(QThread):
                     short_name = sr.get('short_name', simplify_shop_name(sr.get('shop_name', '')))
                     off_count = len(sr.get('off_sale', []))
                     sold_count = len(sr.get('sold_out', []))
-                    self.log(f"   • {short_name}: 下架{off_count}/售罄{sold_count}")
+                    shop_dur = sr.get('duration', 0)
+                    self.log(f"   • {short_name}: 下架{off_count}/售罄{sold_count} ({shop_dur:.1f}秒)")
             
-            # 显示跳过的门店详情
+            # 显示跳过的门店详情（带耗时）
             if all_results['skipped_shops']:
                 self.log(f"")
                 self.log(f"⏸ 跳过的门店列表:")
                 for skip in all_results['skipped_shops']:
                     short_name = skip.get('short_name', simplify_shop_name(skip['name']))
-                    self.log(f"   • {short_name} [{skip['status']}] - {skip['reason']}")
+                    skip_dur = skip.get('duration', 0)
+                    self.log(f"   • {short_name} [{skip['status']}] - {skip['reason']} ({skip_dur:.1f}秒)")
             
             self.log(f"{'='*50}")
             
@@ -610,7 +674,7 @@ class MainWindow(QMainWindow):
         self.shop_manager = ShopManager()  # 门店管理器
         self.init_ui()
         self.load_config_to_ui()
-        self._load_shop_list()  # 加载门店列表
+        self._load_shop_list(silent=True)  # 静默加载门店列表（首次运行可能文件不存在）
     
     def init_ui(self):
         """初始化界面"""
@@ -854,7 +918,7 @@ class MainWindow(QMainWindow):
         shop_file_layout = QHBoxLayout()
         self.shop_file_input = QLineEdit()
         self.shop_file_input.setPlaceholderText("选择门店列表文件 (Excel/JSON)")
-        self.shop_file_input.setText("doc/门店列表_v2.xlsx")
+        # 默认路径会在 load_config_to_ui 中从配置加载
         shop_file_btn = QPushButton("选择")
         shop_file_btn.setObjectName("secondaryBtn")
         shop_file_btn.setFixedWidth(60)
@@ -1118,6 +1182,12 @@ class MainWindow(QMainWindow):
         self.headless_checkbox.setChecked(self.config.headless)
         self.interval_spin.setValue(self.config.check_interval)
         self.export_dir_input.setText(self.config.export_dir)
+        
+        # 加载上一次的门店列表路径
+        if self.config.shop_list_file:
+            self.shop_file_input.setText(self.config.shop_list_file)
+        else:
+            self.shop_file_input.setText("doc/门店列表_v2.xlsx")  # 默认路径
     
     def save_ui_to_config(self):
         """将UI值保存到配置"""
@@ -1188,7 +1258,8 @@ class MainWindow(QMainWindow):
             self.config,
             profile_dir,
             auto_fill_login=self.config.auto_login,
-            shops=shops
+            shops=shops,
+            check_interval=self.config.check_interval  # 监控间隔（分钟）
         )
         
         self.worker.log_signal.connect(self.log)
@@ -1364,14 +1435,22 @@ class MainWindow(QMainWindow):
             total_sold_out = all_results.get('total_sold_out', 0)
             skipped_shops = all_results.get('skipped_shops', [])
             shop_results = all_results.get('shop_results', [])
+            total_duration = all_results.get('total_duration', 0)
             
             total_shops = shops_monitored + shops_skipped
+            
+            # 格式化总耗时
+            if total_duration >= 60:
+                duration_str = f"{int(total_duration // 60)}分{int(total_duration % 60)}秒"
+            else:
+                duration_str = f"{total_duration:.0f}秒"
             
             # 构建 Markdown 消息
             md_lines = []
             md_lines.append(f"### 📊 多门店监控总结")
             md_lines.append(f"> 时间：{now}")
-            md_lines.append(f"> 门店数：{shops_monitored}/{total_shops}")
+            md_lines.append(f"> 耗时：{duration_str}")
+            md_lines.append(f"> 门店：{shops_monitored}/{total_shops}")
             md_lines.append("")
             
             # 统计信息
@@ -1388,12 +1467,13 @@ class MainWindow(QMainWindow):
                 for sr in shop_results:
                     off_count = len(sr.get('off_sale', []))
                     sold_count = len(sr.get('sold_out', []))
+                    shop_dur = sr.get('duration', 0)
                     short_name = sr.get('short_name', '')
                     if not short_name:
                         shop = sr.get('shop')
                         shop_name = shop.name if shop else sr.get('shop_name', '未知')
                         short_name = simplify_shop_name(shop_name)
-                    md_lines.append(f"> • {short_name}: 下架{off_count}/售罄{sold_count}")
+                    md_lines.append(f"> • {short_name}: 下架{off_count}/售罄{sold_count} ({shop_dur:.0f}秒)")
                 md_lines.append("")
             
             # 跳过的门店
@@ -1405,7 +1485,8 @@ class MainWindow(QMainWindow):
                         short_name = simplify_shop_name(skip.get('name', '未知'))
                     reason = skip.get('reason', '')
                     status = skip.get('status', '')
-                    md_lines.append(f"> • <font color=\"warning\">{short_name}</font>")
+                    skip_dur = skip.get('duration', 0)
+                    md_lines.append(f"> • <font color=\"warning\">{short_name}</font> ({skip_dur:.0f}秒)")
                     md_lines.append(f">   {status}: {reason}")
                 md_lines.append("")
             
@@ -1444,8 +1525,13 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("出错")
         QMessageBox.warning(self, "错误", error)
     
-    def _load_shop_list(self):
-        """加载门店列表"""
+    def _load_shop_list(self, silent: bool = False):
+        """
+        加载门店列表
+        
+        Args:
+            silent: 是否静默模式（不输出日志）
+        """
         shop_file = self.shop_file_input.text().strip()
         if not shop_file:
             self.shop_count_label.setText("已加载: 0 个门店")
@@ -1463,8 +1549,13 @@ class MainWindow(QMainWindow):
             shop_file = os.path.join(base_dir, shop_file)
         
         if not os.path.exists(shop_file):
-            self.shop_count_label.setText(f"文件不存在: {shop_file}")
+            # 文件不存在时，静默处理（可能是首次运行或Windows打包后）
+            self.shop_count_label.setText("请选择门店列表文件")
             self.shop_list_text.clear()
+            # 清空默认路径，避免误导
+            if self.shop_file_input.text() == "doc/门店列表_v2.xlsx":
+                self.shop_file_input.clear()
+                self.shop_file_input.setPlaceholderText("请选择门店列表文件 (Excel)")
             return
         
         if self.shop_manager.load(shop_file):
@@ -1481,11 +1572,12 @@ class MainWindow(QMainWindow):
                 preview_lines.append(f"... 共 {len(shops)} 个门店")
             self.shop_list_text.setText("\n".join(preview_lines))
             
-            # 在日志中打印简化的门店列表
-            self.log(f"✓ 已加载 {len(shops)} 个门店:")
-            for shop in shops:
-                short_name = simplify_shop_name(shop.name)
-                self.log(f"   • {short_name}")
+            # 在日志中打印简化的门店列表（非静默模式）
+            if not silent:
+                self.log(f"✓ 已加载 {len(shops)} 个门店:")
+                for shop in shops:
+                    short_name = simplify_shop_name(shop.name)
+                    self.log(f"   • {short_name}")
             
             # 记录门店列表更新
             from datetime import datetime
@@ -1518,9 +1610,10 @@ class MainWindow(QMainWindow):
             if old_file and old_file != self.shop_file_input.text():
                 self.log(f"   上一次: {old_file} ({old_time})")
         else:
-            self.shop_count_label.setText("加载失败")
-            self.shop_list_text.setText(f"✗ 加载门店列表失败,{os.path.basename(shop_file)}")
-            self.log(f"✗ 加载门店列表失败: {shop_file}")
+            self.shop_count_label.setText("加载失败，请检查文件格式")
+            self.shop_list_text.clear()
+            if not silent:
+                self.log(f"⚠ 门店列表加载失败，请检查文件格式: {os.path.basename(shop_file)}")
     
     def select_shop_file(self):
         """选择门店列表文件"""

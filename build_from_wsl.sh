@@ -80,6 +80,7 @@ rm -f "$WIN_BUILD_DIR"/*.py "$WIN_BUILD_DIR"/*.json "$WIN_BUILD_DIR"/*.txt "$WIN
 cp "$SCRIPT_DIR/gui_app.py" "$WIN_BUILD_DIR/"
 cp "$SCRIPT_DIR/config_manager.py" "$WIN_BUILD_DIR/"
 cp "$SCRIPT_DIR/selenium_fetcher.py" "$WIN_BUILD_DIR/"
+cp "$SCRIPT_DIR/shop_manager.py" "$WIN_BUILD_DIR/"
 cp "$SCRIPT_DIR/version.py" "$WIN_BUILD_DIR/"
 cp "$SCRIPT_DIR/build_exe.py" "$WIN_BUILD_DIR/"
 cp "$SCRIPT_DIR/requirements.txt" "$WIN_BUILD_DIR/"

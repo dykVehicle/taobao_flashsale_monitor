@@ -98,9 +98,12 @@ def build():
         # Add data files
         '--add-data=selenium_fetcher.py;.',
         '--add-data=config_manager.py;.',
+        '--add-data=shop_manager.py;.',
         '--add-data=version.json;.',
         # Hidden imports
         '--hidden-import=version',
+        '--hidden-import=shop_manager',
+        '--hidden-import=pandas',
         '--hidden-import=selenium',
         '--hidden-import=selenium.webdriver',
         '--hidden-import=selenium.webdriver.chrome.options',
@@ -121,7 +124,7 @@ def build():
         '--exclude-module=tkinter',
         '--exclude-module=matplotlib',
         '--exclude-module=numpy',
-        '--exclude-module=pandas',
+        # Note: pandas is required by shop_manager
         # Performance: use cache (no --clean), disable UPX compression
         '--noupx',
     ]
@@ -174,14 +177,17 @@ def build_with_console():
         '--noconfirm',
         '--add-data=selenium_fetcher.py;.',
         '--add-data=config_manager.py;.',
+        '--add-data=shop_manager.py;.',
         '--add-data=version.json;.',
         '--hidden-import=version',
+        '--hidden-import=shop_manager',
         '--hidden-import=selenium',
         '--hidden-import=selenium.webdriver',
         '--hidden-import=selenium.webdriver.edge.options',
         '--hidden-import=cryptography',
         '--hidden-import=PyQt6',
         '--hidden-import=openpyxl',
+        '--hidden-import=pandas',
         '--hidden-import=requests',
         '--noupx',
     ]

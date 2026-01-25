@@ -53,6 +53,13 @@ class ShopManager:
     
     def _load_excel(self, path: str) -> bool:
         """从Excel加载店铺配置"""
+        # 优先尝试使用 openpyxl 直接读取（更可靠，不依赖 pandas）
+        try:
+            return self._load_excel_openpyxl(path)
+        except Exception as e:
+            print(f"openpyxl 读取失败: {e}，尝试使用 pandas...")
+        
+        # 备用方案：使用 pandas
         try:
             import pandas as pd
             df = pd.read_excel(path)
@@ -101,15 +108,70 @@ class ShopManager:
                     enabled=enabled
                 ))
             
-            print(f"成功加载 {len(self.shops)} 个店铺配置")
+            print(f"成功加载 {len(self.shops)} 个店铺配置 (pandas)")
             return True
             
-        except ImportError:
-            print("需要安装 pandas 和 openpyxl: pip install pandas openpyxl")
+        except ImportError as e:
+            print(f"pandas 导入失败: {e}")
             return False
         except Exception as e:
-            print(f"读取Excel失败: {e}")
+            print(f"pandas 读取Excel失败: {e}")
             return False
+    
+    def _load_excel_openpyxl(self, path: str) -> bool:
+        """使用 openpyxl 直接读取 Excel（不依赖 pandas）"""
+        from openpyxl import load_workbook
+        
+        wb = load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        
+        # 读取表头
+        headers = []
+        for cell in ws[1]:
+            headers.append(str(cell.value or '').strip())
+        
+        # 查找列索引
+        name_idx = None
+        webhook_idx = None
+        
+        for i, header in enumerate(headers):
+            if header in ['店铺名称', '门店名称', '名称', 'name']:
+                name_idx = i
+            elif header.lower() in ['webhook']:
+                webhook_idx = i
+        
+        if name_idx is None:
+            print(f"Excel缺少必要列: 店铺名称/门店名称，当前列: {headers}")
+            wb.close()
+            return False
+        if webhook_idx is None:
+            print(f"Excel缺少必要列: WebHook，当前列: {headers}")
+            wb.close()
+            return False
+        
+        self.shops = []
+        for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+            if len(row) <= max(name_idx, webhook_idx):
+                continue
+            
+            name = str(row[name_idx] or '').strip()
+            webhook = str(row[webhook_idx] or '').strip()
+            
+            # 过滤空行和无效数据
+            if not name or name.lower() == 'nan' or name == 'None':
+                continue
+            if not webhook or webhook.lower() == 'nan' or not webhook.startswith('http'):
+                continue
+            
+            self.shops.append(ShopInfo(
+                name=name,
+                webhook=webhook,
+                enabled=True
+            ))
+        
+        wb.close()
+        print(f"成功加载 {len(self.shops)} 个店铺配置 (openpyxl)")
+        return True
     
     def _load_json(self, path: str) -> bool:
         """从JSON加载店铺配置"""
