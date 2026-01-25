@@ -594,10 +594,10 @@ class SeleniumGoodsFetcher:
         """
         切换到指定门店
         
-        根据截图流程：
-        1. 点击右上角门店名称下拉按钮（显示"阿狗手打·手作(闵行维璟印象城店)▼"）
-        2. 在搜索框中输入门店名称关键字
-        3. 点击搜索结果中"营业中"的门店
+        根据实际DOM结构流程：
+        1. 点击 shopSwitcher 中的 clk-area 打开下拉菜单
+        2. 在搜索框（placeholder="搜索店铺名称/ID"）中输入门店名称关键字
+        3. 点击 li.cook-cascader-menu-item 中"营业中"的门店
         
         Args:
             shop_keyword: 门店名称关键字（用于搜索，如"闵行维璟"）
@@ -612,10 +612,7 @@ class SeleniumGoodsFetcher:
             }
         """
         from selenium.webdriver.common.by import By
-        from selenium.webdriver.common.action_chains import ActionChains
         from selenium.webdriver.common.keys import Keys
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
         
         result = {
             'success': False,
@@ -631,108 +628,55 @@ class SeleniumGoodsFetcher:
         try:
             self._log(f"正在切换到门店: {shop_keyword}")
             
-            # ========== 步骤1: 点击门店名称下拉按钮 ==========
-            # 根据截图，门店名称显示在顶部工具栏，格式如"阿狗手打·手作(闵行维璟印象城店)▼"
+            # 先按ESC关闭可能已打开的下拉菜单
+            try:
+                body = self.driver.find_element(By.TAG_NAME, "body")
+                body.send_keys(Keys.ESCAPE)
+                time.sleep(1)
+            except:
+                pass
+            
+            # ========== 步骤1: 点击门店切换器打开下拉菜单 ==========
             js_click_dropdown = '''
-                // 方法1: 查找包含店铺名称且有下拉箭头的元素
-                var allElements = document.querySelectorAll('*');
-                var candidates = [];
+                // 优先方法: 查找 shopSwitcher 中的 clk-area
+                var switcher = document.querySelector('[class*="shopSwitcher"]');
+                if (switcher) {
+                    var clkArea = switcher.querySelector('[class*="clk-area"]');
+                    if (clkArea) {
+                        clkArea.click();
+                        return {success: true, text: clkArea.innerText.substring(0, 50), method: 'clk-area'};
+                    }
+                    
+                    var shopName = switcher.querySelector('[class*="shop-name"]');
+                    if (shopName) {
+                        shopName.click();
+                        return {success: true, text: shopName.innerText.substring(0, 50), method: 'shop-name'};
+                    }
+                    
+                    switcher.click();
+                    return {success: true, text: switcher.innerText.substring(0, 50), method: 'switcher'};
+                }
                 
+                // 备用方法: 查找顶部栏中的门店元素
+                var allElements = document.querySelectorAll('*');
                 for (var i = 0; i < allElements.length; i++) {
                     var el = allElements[i];
                     var text = (el.innerText || '').trim();
                     var rect = el.getBoundingClientRect();
                     var cls = (typeof el.className === 'string') ? el.className : '';
                     
-                    // 顶部栏中的门店选择器
-                    if (rect.top >= 0 && rect.top < 100 &&
-                        el.offsetWidth > 100 && el.offsetWidth < 500 &&
-                        el.offsetHeight > 20 && el.offsetHeight < 80) {
+                    if (rect.top >= 0 && rect.top < 80 &&
+                        el.offsetWidth > 150 && el.offsetWidth < 400 &&
+                        (text.indexOf('手打') !== -1 || text.indexOf('手作') !== -1) &&
+                        text.indexOf('账号') === -1 &&
+                        (cls.indexOf('clk') !== -1 || window.getComputedStyle(el).cursor === 'pointer')) {
                         
-                        // 包含店铺相关关键字
-                        var hasShopKeyword = text.indexOf('手打') !== -1 || 
-                                            text.indexOf('手作') !== -1 ||
-                                            text.indexOf('店)') !== -1 ||
-                                            text.indexOf('店）') !== -1;
-                        
-                        // 排除不需要的元素
-                        var isExcluded = text.indexOf('账号') !== -1 ||
-                                        text.indexOf('下载') !== -1 ||
-                                        text.indexOf('搜索') !== -1;
-                        
-                        if (hasShopKeyword && !isExcluded) {
-                            // 检查是否可点击
-                            var style = window.getComputedStyle(el);
-                            var isClickable = style.cursor === 'pointer' ||
-                                            el.tagName === 'BUTTON' ||
-                                            el.onclick !== null ||
-                                            cls.indexOf('clk') !== -1 ||
-                                            cls.indexOf('dropdown') !== -1 ||
-                                            cls.indexOf('select') !== -1 ||
-                                            cls.indexOf('trigger') !== -1;
-                            
-                            candidates.push({
-                                el: el,
-                                text: text.substring(0, 50),
-                                width: el.offsetWidth,
-                                clickable: isClickable,
-                                priority: isClickable ? 1 : 2
-                            });
-                        }
+                        el.click();
+                        return {success: true, text: text.substring(0, 50), method: 'fallback'};
                     }
                 }
                 
-                // 按优先级和宽度排序（优先可点击的、宽度适中的）
-                candidates.sort(function(a, b) {
-                    if (a.priority !== b.priority) return a.priority - b.priority;
-                    // 优先选择宽度在150-350之间的
-                    var aInRange = a.width >= 150 && a.width <= 350;
-                    var bInRange = b.width >= 150 && b.width <= 350;
-                    if (aInRange !== bInRange) return aInRange ? -1 : 1;
-                    return 0;
-                });
-                
-                // 尝试点击候选元素
-                for (var i = 0; i < candidates.length; i++) {
-                    try {
-                        candidates[i].el.click();
-                        return {success: true, text: candidates[i].text, method: 'direct_click'};
-                    } catch(e) {}
-                }
-                
-                // 方法2: 查找rightBlock中的下拉组件
-                var rightBlock = document.querySelector('[class*="rightBlock"]');
-                if (rightBlock) {
-                    // 查找其中的可点击元素
-                    var clickables = rightBlock.querySelectorAll('[class*="dropdown"], [class*="select"], [class*="trigger"], [class*="switch"]');
-                    for (var i = 0; i < clickables.length; i++) {
-                        var el = clickables[i];
-                        if (el.offsetWidth > 80 && el.offsetHeight > 20) {
-                            try {
-                                el.click();
-                                return {success: true, text: el.innerText.substring(0, 30), method: 'rightBlock'};
-                            } catch(e) {}
-                        }
-                    }
-                }
-                
-                // 方法3: 查找工具栏中的shopState相关元素的父级
-                var shopStates = document.querySelectorAll('[class*="shopState"], [class*="shop-state"]');
-                for (var i = 0; i < shopStates.length; i++) {
-                    var parent = shopStates[i].parentElement;
-                    while (parent && parent.tagName !== 'BODY') {
-                        var rect = parent.getBoundingClientRect();
-                        if (rect.top < 100 && parent.offsetWidth > 100 && parent.offsetWidth < 400) {
-                            try {
-                                parent.click();
-                                return {success: true, text: parent.innerText.substring(0, 30), method: 'shopState_parent'};
-                            } catch(e) {}
-                        }
-                        parent = parent.parentElement;
-                    }
-                }
-                
-                return {success: false, text: '', message: 'No clickable shop selector found'};
+                return {success: false, message: '未找到门店切换器'};
             '''
             
             click_result = self.driver.execute_script(js_click_dropdown)
@@ -745,18 +689,13 @@ class SeleniumGoodsFetcher:
             time.sleep(1.5)
             
             # ========== 步骤2: 在搜索框中输入关键字 ==========
-            # 使用Selenium原生方式查找输入框，更可靠
             search_input = None
             try:
-                # 尝试多种选择器
+                # 优先使用 placeholder 精确匹配
                 selectors = [
+                    'input[placeholder*="搜索店铺"]',
                     'input[placeholder*="搜索"]',
                     'input[placeholder*="店铺"]',
-                    'input[placeholder*="ID"]',
-                    'input[placeholder*="门店"]',
-                    '[class*="dropdown"] input[type="text"]',
-                    '[class*="popup"] input[type="text"]',
-                    '[class*="modal"] input[type="text"]',
                 ]
                 for selector in selectors:
                     try:
@@ -764,11 +703,10 @@ class SeleniumGoodsFetcher:
                         for inp in inputs:
                             if inp.is_displayed() and inp.is_enabled():
                                 rect = self.driver.execute_script(
-                                    "var r = arguments[0].getBoundingClientRect(); return {top: r.top, left: r.left};",
+                                    "var r = arguments[0].getBoundingClientRect(); return {top: r.top};",
                                     inp
                                 )
-                                # 搜索框应该在下拉菜单中
-                                if rect['top'] > 30 and rect['top'] < 300:
+                                if rect['top'] > 30 and rect['top'] < 200:
                                     search_input = inp
                                     break
                     except:
@@ -779,152 +717,87 @@ class SeleniumGoodsFetcher:
                 self._log(f"   查找搜索框出错: {e}")
             
             if search_input:
-                # 使用Selenium原生方式输入
                 search_input.clear()
                 search_input.send_keys(shop_keyword)
                 self._log(f"   步骤2: ✓ 已输入搜索关键字: {shop_keyword}")
             else:
-                # 降级使用JS方式
-                js_input_search = f'''
-                    var inputs = document.querySelectorAll('input');
-                    for (var i = 0; i < inputs.length; i++) {{
-                        var input = inputs[i];
-                        var rect = input.getBoundingClientRect();
-                        var placeholder = input.placeholder || '';
-                        
-                        // 搜索框应该在下拉菜单中，位置在顶部
-                        if (rect.top > 30 && rect.top < 300 && 
-                            input.offsetWidth > 80 &&
-                            input.type !== 'hidden' &&
-                            (placeholder.indexOf('搜索') !== -1 || 
-                             placeholder.indexOf('店铺') !== -1 ||
-                             placeholder.indexOf('ID') !== -1 ||
-                             placeholder === '' && rect.left > 300)) {{
-                            
-                            input.focus();
-                            input.value = '{shop_keyword}';
-                            input.dispatchEvent(new Event('input', {{bubbles: true}}));
-                            input.dispatchEvent(new Event('change', {{bubbles: true}}));
-                            input.dispatchEvent(new KeyboardEvent('keyup', {{bubbles: true}}));
-                            return {{success: true, placeholder: placeholder}};
-                        }}
-                    }}
-                    return {{success: false, message: 'No search input found'}};
-                '''
-                search_result = self.driver.execute_script(js_input_search)
-                if not search_result or not search_result.get('success'):
-                    result['message'] = '未找到搜索框'
-                    self._log(f"   步骤2: ✗ {result['message']}")
-                    return result
-                self._log(f"   步骤2: ✓ 已输入搜索关键字: {shop_keyword} (JS)")
-            
-            time.sleep(2)  # 等待搜索结果
+                result['message'] = '未找到搜索框'
+                self._log(f"   步骤2: ✗ {result['message']}")
+                return result
             
             # ========== 步骤3: 点击搜索结果中"营业中"的门店 ==========
+            # 使用精确选择器: li.cook-cascader-menu-item，带重试机制
             js_click_shop = f'''
+                var items = document.querySelectorAll('li.cook-cascader-menu-item');
                 var candidates = [];
-                var allElements = document.querySelectorAll('*');
                 
-                // 收集所有可能的搜索结果项
-                for (var i = 0; i < allElements.length; i++) {{
-                    var el = allElements[i];
-                    var text = (el.innerText || '').trim();
-                    var rect = el.getBoundingClientRect();
+                for (var i = 0; i < items.length; i++) {{
+                    var item = items[i];
+                    var text = (item.innerText || '').trim();
                     
-                    // 跳过太大或太小的元素
-                    if (el.offsetWidth < 100 || el.offsetWidth > 800) continue;
-                    if (el.offsetHeight < 25 || el.offsetHeight > 150) continue;
-                    
-                    // 搜索结果应该在下拉菜单中
-                    if (rect.top < 50 || rect.top > 500) continue;
-                    
-                    // 必须包含搜索关键字
                     if (text.indexOf('{shop_keyword}') === -1) continue;
-                    
-                    // 排除输入框自身
-                    if (el.tagName === 'INPUT') continue;
                     
                     var isOpen = text.indexOf('营业中') !== -1;
                     var isClosed = text.indexOf('休息中') !== -1 || 
-                                  text.indexOf('打烊') !== -1 ||
-                                  text.indexOf('歇业') !== -1;
+                                  text.indexOf('已下线') !== -1 ||
+                                  text.indexOf('打烊') !== -1;
                     
-                    // 提取店铺名称（第一行或括号内容）
                     var shopName = text.split('\\n')[0];
-                    var match = text.match(/[^\\n]*{shop_keyword}[^\\n]*/);
-                    if (match) shopName = match[0];
                     
                     candidates.push({{
-                        el: el,
+                        el: item,
                         text: text,
-                        shopName: shopName.substring(0, 60),
-                        top: rect.top,
-                        height: el.offsetHeight,
+                        shopName: shopName,
                         isOpen: isOpen,
                         isClosed: isClosed,
-                        // 优先级：营业中 > 其他 > 休息中
                         priority: isOpen ? 1 : (isClosed ? 3 : 2)
                     }});
                 }}
                 
-                // 去重（按top值分组，选择高度最小的）
-                var uniqueCandidates = [];
-                var seenTops = {{}};
-                candidates.sort(function(a, b) {{ return a.height - b.height; }});
+                // 按优先级排序（营业中优先）
+                candidates.sort(function(a, b) {{ return a.priority - b.priority; }});
+                
+                // 点击营业中的门店
                 for (var i = 0; i < candidates.length; i++) {{
                     var c = candidates[i];
-                    var topKey = Math.round(c.top / 10);  // 10px容差
-                    if (!seenTops[topKey]) {{
-                        seenTops[topKey] = true;
-                        uniqueCandidates.push(c);
-                    }}
-                }}
-                
-                // 按优先级排序
-                uniqueCandidates.sort(function(a, b) {{ return a.priority - b.priority; }});
-                
-                // 返回调试信息
-                var debugInfo = uniqueCandidates.map(function(c) {{
-                    return c.shopName + (c.isOpen ? '[营业]' : (c.isClosed ? '[休息]' : ''));
-                }}).join(', ');
-                
-                // 尝试点击营业中的门店
-                for (var i = 0; i < uniqueCandidates.length; i++) {{
-                    var c = uniqueCandidates[i];
                     if (c.isOpen) {{
-                        try {{
-                            c.el.click();
-                            return {{
-                                success: true,
-                                shop_name: c.shopName,
-                                is_open: true,
-                                debug: debugInfo
-                            }};
-                        }} catch(e) {{}}
+                        c.el.click();
+                        return {{
+                            success: true,
+                            shop_name: c.shopName,
+                            is_open: true,
+                            total_found: candidates.length
+                        }};
                     }}
                 }}
                 
-                // 如果没有营业中的，返回第一个结果信息
-                if (uniqueCandidates.length > 0) {{
-                    var first = uniqueCandidates[0];
+                // 没有营业中的，返回信息
+                if (candidates.length > 0) {{
+                    var first = candidates[0];
                     return {{
                         success: false,
                         shop_name: first.shopName,
-                        is_open: first.isOpen,
+                        is_open: false,
                         is_closed: first.isClosed,
-                        message: first.isClosed ? '门店休息中，跳过' : '未找到营业中的门店',
-                        debug: debugInfo
+                        message: first.isClosed ? '门店休息中/已下线' : '未找到营业中的门店',
+                        total_found: candidates.length
                     }};
                 }}
                 
                 return {{
                     success: false,
                     message: '未找到匹配的门店',
-                    debug: '共检查 ' + allElements.length + ' 个元素'
+                    total_found: 0
                 }};
             '''
             
-            shop_result = self.driver.execute_script(js_click_shop)
+            # 带重试的等待搜索结果
+            shop_result = None
+            for retry in range(5):  # 最多等待5秒
+                time.sleep(1)
+                shop_result = self.driver.execute_script(js_click_shop)
+                if shop_result and (shop_result.get('success') or shop_result.get('total_found', 0) > 0):
+                    break
             
             if shop_result and shop_result.get('success'):
                 result['success'] = True
@@ -938,8 +811,6 @@ class SeleniumGoodsFetcher:
                 result['is_open'] = shop_result.get('is_open', False) if shop_result else False
                 result['message'] = shop_result.get('message', '切换门店失败') if shop_result else '切换门店失败'
                 self._log(f"   步骤3: ✗ {result['message']}")
-                if shop_result and shop_result.get('debug'):
-                    self._log(f"   调试: {shop_result['debug']}")
                 
                 # 关闭下拉菜单
                 try:
