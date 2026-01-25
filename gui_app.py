@@ -10,7 +10,7 @@ import sys
 import time
 import threading
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 # 确保依赖
 def ensure_gui_dependencies():
@@ -47,28 +47,32 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QIcon, QPalette, QColor, QTextCursor, QFontDatabase
 
 from config_manager import ConfigManager, AppConfig
+from shop_manager import ShopManager, ShopInfo
 try:
     from version import get_version
 except ImportError:
     # Fallback if version module is missing during dev or specific build contexts
-    def get_version(): return "1.0"
+    def get_version(): return "2.0"
 
 
 
 class MonitorWorker(QThread):
-    """监控工作线程"""
+    """监控工作线程 - 支持多门店监控"""
     log_signal = pyqtSignal(str)
     status_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int)
     finished_signal = pyqtSignal(dict)
     error_signal = pyqtSignal(str)
     login_required_signal = pyqtSignal()
+    shop_result_signal = pyqtSignal(dict)  # 单个门店结果信号
     
-    def __init__(self, config: AppConfig, profile_dir: str, auto_fill_login: bool = False):
+    def __init__(self, config: AppConfig, profile_dir: str, auto_fill_login: bool = False, 
+                 shops: List[ShopInfo] = None):
         super().__init__()
         self.config = config
         self.profile_dir = profile_dir
         self.auto_fill_login = auto_fill_login
+        self.shops = shops or []  # 门店列表
         self.running = True
         self.fetcher = None
         self._is_cleaning_up = False
@@ -101,12 +105,11 @@ class MonitorWorker(QThread):
             
             if not self.running: return
             
-            # 启动浏览器 - 正确的商品管理页面URL
+            # 启动浏览器
             open_url = f"{self.config.base_url}/app/shop/{self.config.shop_id}/food#app.shop.food?path=management"
             self.log("正在查找浏览器...")
             self.progress_signal.emit(20)
             
-            # 先检查是否能找到浏览器
             browser_path = self.fetcher._find_browser_executable()
             if browser_path:
                 self.log(f"找到浏览器: {browser_path}")
@@ -140,48 +143,23 @@ class MonitorWorker(QThread):
             self.log("浏览器已启动")
             self.progress_signal.emit(30)
             
-            # 如果需要自动填充登录
+            # 自动填充登录
             if self.auto_fill_login and self.config.taobao_username and self.config.taobao_password:
                 if not self.running: return
                 self.log("正在尝试自动登录...")
                 self._try_auto_login()
-            
-            # 开始抓取
-            if not self.running: return
-            self.log("开始抓取商品数据...")
-            self.status_signal.emit("抓取中...")
-            self.progress_signal.emit(50)
             
             # 传递日志回调给 fetcher
             def log_callback(msg):
                 if self.running:
                     self.log(msg)
             
-            goods_list = self.fetcher.login_and_fetch(
-                auto_login=False,
-                wait_for_login=True,
-                login_timeout=30 * 60,
-                log_callback=log_callback,
-            )
-            
-            if not self.running: return
-            self.progress_signal.emit(80)
-            
-            # 统计结果
-            off_sale = [g for g in goods_list if g.status == "OFF_SALE"]
-            sold_out = [g for g in goods_list if g.status == "SOLD_OUT"]
-            
-            result = {
-                "off_sale": off_sale,
-                "sold_out": sold_out,
-                "total": len(goods_list),
-            }
-            
-            if self.running:
-                self.log(f"抓取完成！已下架: {len(off_sale)} 个, 已售罄: {len(sold_out)} 个")
-                self.progress_signal.emit(100)
-                self.status_signal.emit("完成")
-                self.finished_signal.emit(result)
+            # ========== 多门店监控模式 ==========
+            if self.shops:
+                self._run_multi_shop_monitor(log_callback)
+            else:
+                # 单店铺模式（兼容旧逻辑）
+                self._run_single_shop_monitor(log_callback)
             
         except Exception as e:
             if self.running:
@@ -189,9 +167,177 @@ class MonitorWorker(QThread):
                 import traceback
                 self.log(f"错误详情: {traceback.format_exc()}")
         finally:
-            # 如果是手动停止，清理工作由 force_stop 线程处理
             if self.running:
                 self._cleanup()
+    
+    def _run_multi_shop_monitor(self, log_callback):
+        """多门店监控"""
+        total_shops = len(self.shops)
+        all_results = {
+            'shops_monitored': 0,
+            'shops_skipped': 0,
+            'total_off_sale': 0,
+            'total_sold_out': 0,
+            'shop_results': []
+        }
+        
+        self.log(f"")
+        self.log(f"{'='*50}")
+        self.log(f"开始多门店监控，共 {total_shops} 个门店")
+        self.log(f"{'='*50}")
+        
+        for idx, shop in enumerate(self.shops):
+            if not self.running:
+                break
+            
+            progress = 30 + int((idx / total_shops) * 60)
+            self.progress_signal.emit(progress)
+            self.status_signal.emit(f"监控中: {shop.name} ({idx+1}/{total_shops})")
+            
+            self.log(f"")
+            self.log(f"┌{'─'*48}┐")
+            self.log(f"│ [{idx+1}/{total_shops}] 正在监控: {shop.name}")
+            self.log(f"└{'─'*48}┘")
+            
+            # 切换门店
+            switch_result = self.fetcher.switch_shop(shop.name)
+            
+            if not switch_result['success']:
+                if not switch_result['is_open']:
+                    self.log(f"   ⏸ 门店未营业，跳过: {switch_result.get('message', '')}")
+                    all_results['shops_skipped'] += 1
+                else:
+                    self.log(f"   ✗ 切换门店失败: {switch_result.get('message', '')}")
+                    all_results['shops_skipped'] += 1
+                continue
+            
+            # 等待页面加载
+            time.sleep(3)
+            
+            # 抓取商品数据
+            try:
+                goods_list = self.fetcher.login_and_fetch(
+                    auto_login=False,
+                    wait_for_login=False,
+                    login_timeout=60,
+                    log_callback=log_callback,
+                )
+                
+                off_sale = [g for g in goods_list if g.status == "OFF_SALE"]
+                sold_out = [g for g in goods_list if g.status == "SOLD_OUT"]
+                
+                shop_result = {
+                    'shop': shop,
+                    'off_sale': off_sale,
+                    'sold_out': sold_out,
+                    'total': len(goods_list),
+                    'success': True
+                }
+                
+                all_results['shops_monitored'] += 1
+                all_results['total_off_sale'] += len(off_sale)
+                all_results['total_sold_out'] += len(sold_out)
+                all_results['shop_results'].append(shop_result)
+                
+                self.log(f"   ✓ 抓取完成: 下架 {len(off_sale)} 个, 售罄 {len(sold_out)} 个")
+                
+                # 发送单店通知
+                if (len(off_sale) > 0 or len(sold_out) > 0) and shop.webhook:
+                    self._send_shop_notification(shop, off_sale, sold_out)
+                
+                # 发送单店结果信号
+                self.shop_result_signal.emit(shop_result)
+                
+            except Exception as e:
+                self.log(f"   ✗ 抓取失败: {e}")
+                all_results['shops_skipped'] += 1
+        
+        # 完成
+        if self.running:
+            self.log(f"")
+            self.log(f"{'='*50}")
+            self.log(f"多门店监控完成！")
+            self.log(f"  监控成功: {all_results['shops_monitored']} 个门店")
+            self.log(f"  跳过: {all_results['shops_skipped']} 个门店")
+            self.log(f"  总计下架: {all_results['total_off_sale']} 个商品")
+            self.log(f"  总计售罄: {all_results['total_sold_out']} 个商品")
+            self.log(f"{'='*50}")
+            
+            self.progress_signal.emit(100)
+            self.status_signal.emit("完成")
+            
+            # 发送完成信号
+            self.finished_signal.emit({
+                'off_sale': [],
+                'sold_out': [],
+                'total': 0,
+                'multi_shop': True,
+                'all_results': all_results
+            })
+    
+    def _run_single_shop_monitor(self, log_callback):
+        """单店铺监控（兼容旧逻辑）"""
+        if not self.running: return
+        self.log("开始抓取商品数据...")
+        self.status_signal.emit("抓取中...")
+        self.progress_signal.emit(50)
+        
+        goods_list = self.fetcher.login_and_fetch(
+            auto_login=False,
+            wait_for_login=True,
+            login_timeout=30 * 60,
+            log_callback=log_callback,
+        )
+        
+        if not self.running: return
+        self.progress_signal.emit(80)
+        
+        off_sale = [g for g in goods_list if g.status == "OFF_SALE"]
+        sold_out = [g for g in goods_list if g.status == "SOLD_OUT"]
+        
+        result = {
+            "off_sale": off_sale,
+            "sold_out": sold_out,
+            "total": len(goods_list),
+        }
+        
+        if self.running:
+            self.log(f"抓取完成！已下架: {len(off_sale)} 个, 已售罄: {len(sold_out)} 个")
+            self.progress_signal.emit(100)
+            self.status_signal.emit("完成")
+            self.finished_signal.emit(result)
+    
+    def _send_shop_notification(self, shop: ShopInfo, off_sale_list, sold_out_list):
+        """发送单店通知"""
+        import requests
+        from selenium_fetcher import SeleniumGoodsFetcher
+        
+        try:
+            # 生成消息
+            try:
+                msg_body = SeleniumGoodsFetcher.format_wecom_markdown(
+                    shop.name, off_sale_list, sold_out_list
+                )
+            except:
+                text_msg = SeleniumGoodsFetcher.format_wecom_message(
+                    shop.name, off_sale_list, sold_out_list
+                )
+                msg_body = {"msgtype": "text", "text": {"content": text_msg}}
+            
+            # 发送请求
+            resp = requests.post(shop.webhook, json=msg_body, timeout=10)
+            
+            if resp.status_code == 200:
+                result = resp.json()
+                if result.get("errcode") == 0:
+                    self.log(f"   📤 已发送通知到: {shop.name}")
+                else:
+                    self.log(f"   ✗ 通知发送失败: {result.get('errmsg')}")
+            else:
+                self.log(f"   ✗ 通知发送失败: HTTP {resp.status_code}")
+                
+        except Exception as e:
+            self.log(f"   ✗ 发送通知出错: {e}")
     
     def _try_auto_login(self):
         """尝试自动填充登录表单"""
@@ -349,8 +495,10 @@ class MainWindow(QMainWindow):
         self.config_manager = ConfigManager()
         self.config = self.config_manager.config
         self.worker = None
+        self.shop_manager = ShopManager()  # 门店管理器
         self.init_ui()
         self.load_config_to_ui()
+        self._load_shop_list()  # 加载门店列表
     
     def init_ui(self):
         """初始化界面"""
@@ -584,10 +732,57 @@ class MainWindow(QMainWindow):
         shop_layout = QVBoxLayout(shop_tab)
         shop_layout.setContentsMargins(25, 25, 25, 25)
         
-        shop_group = QGroupBox("🏪 店铺信息")
+        # 多门店配置
+        multi_shop_group = QGroupBox("🏪 多门店监控配置")
+        multi_shop_layout = QVBoxLayout(multi_shop_group)
+        multi_shop_layout.setContentsMargins(20, 25, 20, 20)
+        
+        # 门店列表文件选择
+        shop_file_layout = QHBoxLayout()
+        self.shop_file_input = QLineEdit()
+        self.shop_file_input.setPlaceholderText("选择门店列表文件 (Excel/JSON)")
+        self.shop_file_input.setText("doc/店铺列表.xlsx")
+        shop_file_btn = QPushButton("选择")
+        shop_file_btn.setObjectName("secondaryBtn")
+        shop_file_btn.setFixedWidth(70)
+        shop_file_btn.clicked.connect(self.select_shop_file)
+        shop_file_layout.addWidget(self.shop_file_input)
+        shop_file_layout.addWidget(shop_file_btn)
+        multi_shop_layout.addLayout(shop_file_layout)
+        
+        # 加载和刷新按钮
+        btn_layout = QHBoxLayout()
+        load_shops_btn = QPushButton("📥 加载门店列表")
+        load_shops_btn.setObjectName("secondaryBtn")
+        load_shops_btn.clicked.connect(self._load_shop_list)
+        btn_layout.addWidget(load_shops_btn)
+        btn_layout.addStretch()
+        multi_shop_layout.addLayout(btn_layout)
+        
+        # 门店数量显示
+        self.shop_count_label = QLabel("已加载: 0 个门店")
+        self.shop_count_label.setStyleSheet("color: #7f8fa6; font-size: 12px;")
+        multi_shop_layout.addWidget(self.shop_count_label)
+        
+        # 门店列表预览
+        self.shop_list_text = QTextEdit()
+        self.shop_list_text.setReadOnly(True)
+        self.shop_list_text.setMaximumHeight(120)
+        self.shop_list_text.setPlaceholderText("门店列表预览...")
+        multi_shop_layout.addWidget(self.shop_list_text)
+        
+        # 启用多门店监控
+        self.multi_shop_checkbox = QCheckBox("启用多门店监控模式")
+        self.multi_shop_checkbox.setChecked(True)
+        multi_shop_layout.addWidget(self.multi_shop_checkbox)
+        
+        shop_layout.addWidget(multi_shop_group)
+        
+        # 基础店铺配置（用于单店模式或默认店铺）
+        shop_group = QGroupBox("🏠 默认店铺信息（单店模式）")
         shop_form = QFormLayout(shop_group)
-        shop_form.setSpacing(20)
-        shop_form.setContentsMargins(20, 25, 20, 20)
+        shop_form.setSpacing(15)
+        shop_form.setContentsMargins(20, 20, 20, 15)
         
         self.chain_id_input = QLineEdit()
         self.chain_id_input.setPlaceholderText("连锁店ID")
@@ -604,10 +799,10 @@ class MainWindow(QMainWindow):
         shop_layout.addWidget(shop_group)
         
         # 通知配置
-        notify_group = QGroupBox("📢 通知设置")
+        notify_group = QGroupBox("📢 通知设置（单店模式使用）")
         notify_form = QFormLayout(notify_group)
-        notify_form.setSpacing(20)
-        notify_form.setContentsMargins(20, 25, 20, 20)
+        notify_form.setSpacing(15)
+        notify_form.setContentsMargins(20, 20, 20, 15)
         
         self.webhook_input = QLineEdit()
         self.webhook_input.setPlaceholderText("企业微信机器人Webhook地址")
@@ -857,24 +1052,35 @@ class MainWindow(QMainWindow):
         """开始监控"""
         self.save_ui_to_config()
         
-        if not self.config.chain_id or not self.config.shop_id:
-            QMessageBox.warning(self, "提示", "请先配置店铺ID！")
-            return
+        # 检查是否使用多门店模式
+        use_multi_shop = self.multi_shop_checkbox.isChecked() and len(self.shop_manager.shops) > 0
+        
+        if not use_multi_shop:
+            # 单店模式：检查店铺ID
+            if not self.config.chain_id or not self.config.shop_id:
+                QMessageBox.warning(self, "提示", "请先配置店铺ID！\n或者启用多门店监控模式并加载门店列表。")
+                return
         
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.progress_bar.setValue(0)
         
         self.log("=" * 50)
-        self.log("开始监控...")
+        if use_multi_shop:
+            self.log(f"开始多门店监控模式，共 {len(self.shop_manager.shops)} 个门店...")
+        else:
+            self.log("开始单店监控...")
         self.statusBar().showMessage("监控中...")
         
         # 创建工作线程
         profile_dir = self.config_manager.get_profile_dir()
+        shops = self.shop_manager.get_enabled_shops() if use_multi_shop else []
+        
         self.worker = MonitorWorker(
             self.config,
             profile_dir,
-            auto_fill_login=self.config.auto_login
+            auto_fill_login=self.config.auto_login,
+            shops=shops
         )
         
         self.worker.log_signal.connect(self.log)
@@ -882,6 +1088,7 @@ class MainWindow(QMainWindow):
         self.worker.progress_signal.connect(self.progress_bar.setValue)
         self.worker.finished_signal.connect(self.on_monitor_finished)
         self.worker.error_signal.connect(self.on_monitor_error)
+        self.worker.shop_result_signal.connect(self.on_shop_result)
         
         self.worker.start()
     
@@ -897,11 +1104,34 @@ class MainWindow(QMainWindow):
         self.log("监控已停止")
         self.statusBar().showMessage("已停止")
     
+    def on_shop_result(self, result: dict):
+        """单个门店监控结果"""
+        # 可以在这里更新UI显示单店结果
+        pass
+    
     def on_monitor_finished(self, result: dict):
         """监控完成"""
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         
+        # 检查是否是多门店监控结果
+        if result.get('multi_shop'):
+            all_results = result.get('all_results', {})
+            total_off_sale = all_results.get('total_off_sale', 0)
+            total_sold_out = all_results.get('total_sold_out', 0)
+            shops_monitored = all_results.get('shops_monitored', 0)
+            shops_skipped = all_results.get('shops_skipped', 0)
+            
+            self.off_sale_label.setText(f"已下架: {total_off_sale}")
+            self.sold_out_label.setText(f"已售罄: {total_sold_out}")
+            self.total_label.setText(f"门店: {shops_monitored}/{shops_monitored + shops_skipped}")
+            
+            self.log("")
+            self.log("=" * 50)
+            self.statusBar().showMessage("多门店监控完成")
+            return
+        
+        # 单店模式结果
         off_sale_list = result.get("off_sale", [])
         sold_out_list = result.get("sold_out", [])
         off_sale = len(off_sale_list)
@@ -1015,6 +1245,58 @@ class MainWindow(QMainWindow):
         self.log(f"✗ 错误: {error}")
         self.statusBar().showMessage("出错")
         QMessageBox.warning(self, "错误", error)
+    
+    def _load_shop_list(self):
+        """加载门店列表"""
+        shop_file = self.shop_file_input.text().strip()
+        if not shop_file:
+            self.shop_count_label.setText("已加载: 0 个门店")
+            self.shop_list_text.clear()
+            return
+        
+        # 支持相对路径
+        if not os.path.isabs(shop_file):
+            # 获取应用目录
+            import sys
+            if getattr(sys, 'frozen', False):
+                base_dir = os.path.dirname(sys.executable)
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+            shop_file = os.path.join(base_dir, shop_file)
+        
+        if not os.path.exists(shop_file):
+            self.shop_count_label.setText(f"文件不存在: {shop_file}")
+            self.shop_list_text.clear()
+            return
+        
+        if self.shop_manager.load(shop_file):
+            shops = self.shop_manager.shops
+            self.shop_count_label.setText(f"已加载: {len(shops)} 个门店")
+            
+            # 显示门店列表预览
+            preview_lines = []
+            for i, shop in enumerate(shops[:10]):  # 只显示前10个
+                status = "✓" if shop.enabled else "✗"
+                preview_lines.append(f"{status} {shop.name}")
+            if len(shops) > 10:
+                preview_lines.append(f"... 共 {len(shops)} 个门店")
+            self.shop_list_text.setText("\n".join(preview_lines))
+            
+            self.log(f"✓ 已加载 {len(shops)} 个门店配置")
+        else:
+            self.shop_count_label.setText("加载失败")
+            self.shop_list_text.setText("加载门店列表失败，请检查文件格式")
+            self.log("✗ 加载门店列表失败")
+    
+    def select_shop_file(self):
+        """选择门店列表文件"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择门店列表文件", "",
+            "Excel文件 (*.xlsx *.xls);;JSON文件 (*.json);;所有文件 (*.*)"
+        )
+        if path:
+            self.shop_file_input.setText(path)
+            self._load_shop_list()
     
     def select_browser_path(self):
         """选择浏览器路径"""
