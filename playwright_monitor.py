@@ -218,99 +218,130 @@ class PlaywrightMonitor:
         
         return name if name else full_name
     
-    async def _get_current_shop_name(self, page) -> str:
-        """获取当前页面显示的门店名称"""
+    async def _get_current_shop_name(self, page, silent: bool = False) -> str:
+        """
+        获取当前页面显示的门店名称
+        
+        Args:
+            silent: 是否静默模式（不输出日志）
+        """
         try:
-            # 使用JavaScript获取门店名称，更可靠
+            # 使用JavaScript获取门店名称，更可靠、更快速
             js_code = '''
                 (() => {
-                    // 方法1: 从shopSwitcher获取
+                    // 方法1: 从shopSwitcher获取（最可靠）
                     let switcher = document.querySelector('.shopSwitcher .clk-area');
                     if (switcher) {
                         let text = switcher.innerText || switcher.textContent;
                         if (text && text.includes('(')) return text.trim();
                     }
                     
-                    // 方法2: 从包含"阿狗"的元素获取
-                    let allElements = document.querySelectorAll('*');
-                    for (let el of allElements) {
-                        let text = el.innerText || el.textContent || '';
-                        // 匹配门店名称格式：包含品牌名和括号
-                        if (text.includes('阿狗手打') && text.includes('(') && text.includes('店)')) {
-                            // 提取完整门店名称
-                            let match = text.match(/阿狗手打[^\\n]+\\([^)]+店\\)/);
-                            if (match) return match[0].trim();
-                        }
+                    // 方法2: 从cook-select获取
+                    let cookSelect = document.querySelector('.shopSwitcher .cook-select');
+                    if (cookSelect) {
+                        let text = cookSelect.innerText || cookSelect.textContent;
+                        if (text && text.includes('(')) return text.trim();
                     }
                     
-                    // 方法3: 从页面标题获取
-                    if (document.title && document.title.includes('(')) {
-                        return document.title.trim();
+                    // 方法3: 尝试更多选择器
+                    let selectors = [
+                        '.shopSwitcher',
+                        '[class*="shopSwitch"]',
+                        '[class*="shop-switch"]'
+                    ];
+                    for (let sel of selectors) {
+                        let el = document.querySelector(sel);
+                        if (el) {
+                            let text = el.innerText || el.textContent || '';
+                            let match = text.match(/[^\\n]+\\([^)]+店\\)/);
+                            if (match) return match[0].trim();
+                        }
                     }
                     
                     return '';
                 })()
             '''
             current_shop = await page.evaluate(js_code)
-            if current_shop:
-                self.log(f"   📍 当前页面门店: {current_shop[:50]}...")
+            if current_shop and not silent:
+                self.log(f"   📍 当前门店: {current_shop[:40]}...")
             return current_shop or ''
         except Exception as e:
-            self.log(f"   ⚠ 获取当前门店名称失败: {e}")
+            if not silent:
+                self.log(f"   ⚠ 获取当前门店名称失败: {e}")
             return ''
     
-    async def _verify_shop_switched(self, page, target_shop_name: str) -> Tuple[bool, str]:
-        """验证是否成功切换到目标门店，返回 (是否成功, 当前门店名称)"""
+    async def _verify_shop_switched(self, page, target_shop_name: str, silent: bool = False) -> Tuple[bool, str]:
+        """
+        验证是否成功切换到目标门店
+        
+        Args:
+            silent: 是否静默模式（不输出日志，用于快速轮询）
+            
+        Returns:
+            (是否成功, 当前门店名称)
+        """
         try:
             short_name = self._simplify_shop_name(target_shop_name)
-            current_shop = await self._get_current_shop_name(page)
+            current_shop = await self._get_current_shop_name(page, silent=True)
             
             if not current_shop:
-                self.log(f"   ⚠ 无法获取当前门店名称，验证失败")
+                if not silent:
+                    self.log(f"   ⚠ 无法获取当前门店名称")
                 return False, ''
             
             # 提取当前门店的简短名称进行比较
             current_short = self._simplify_shop_name(current_shop)
             
-            self.log(f"   🔍 验证门店: 目标[{short_name}] vs 当前[{current_short}]")
-            
             # 严格匹配：目标门店简称必须与当前门店简称相同
             if short_name == current_short:
-                self.log(f"   ✓ 门店验证通过")
+                if not silent:
+                    self.log(f"   ✓ 门店验证通过: {short_name}")
                 return True, current_shop
             
             # 如果简称不完全匹配，检查是否包含关键字
-            # 从目标门店名称提取关键字（去掉通用部分）
             target_keywords = short_name.replace('店', '')
             current_keywords = current_short.replace('店', '')
             
             if target_keywords and target_keywords in current_keywords:
-                self.log(f"   ✓ 门店关键字匹配通过")
+                if not silent:
+                    self.log(f"   ✓ 门店匹配: {short_name}")
                 return True, current_shop
             
-            self.log(f"   ✗ 门店验证失败: 期望[{short_name}], 实际[{current_short}]")
+            if not silent:
+                self.log(f"   ✗ 门店验证失败: 期望[{short_name}], 实际[{current_short}]")
             return False, current_shop
         except Exception as e:
-            self.log(f"   ⚠ 门店验证异常: {e}")
+            if not silent:
+                self.log(f"   ⚠ 门店验证异常: {e}")
             return False, ''
     
     async def _switch_shop(self, page, shop_name: str) -> dict:
-        """切换到指定门店"""
+        """
+        切换到指定门店（优化版）
+        
+        优化点：
+        1. 使用智能等待替代固定sleep
+        2. 使用更短的关键字搜索
+        3. 更多选择器覆盖
+        4. 更快的验证逻辑
+        """
         try:
             short_name = self._simplify_shop_name(shop_name)
             
-            # 步骤1: 点击门店切换器打开下拉框
+            # ========== 步骤1: 点击门店切换器打开下拉框 ==========
             dropdown_selectors = [
                 '.shopSwitcher .clk-area',
                 '[class*="shopSwitcher"] [class*="clk-area"]',
+                '.shopSwitcher .cook-select',
                 '.shopSwitcher',
+                '[class*="shop"] [class*="switch"]',
             ]
             
             clicked = False
             for selector in dropdown_selectors:
                 try:
                     elem = page.locator(selector).first
-                    if await elem.is_visible(timeout=2000):
+                    if await elem.is_visible(timeout=1500):
                         await elem.click()
                         clicked = True
                         break
@@ -320,77 +351,100 @@ class PlaywrightMonitor:
             if not clicked:
                 return {'success': False, 'reason': '未找到门店下拉按钮'}
             
-            await asyncio.sleep(2)
-            
-            # 步骤2: 在搜索框中输入关键字
+            # 智能等待：等待搜索框出现，最多1.5秒
             search_selectors = [
                 'input[placeholder*="搜索店铺"]',
                 'input[placeholder*="搜索"]',
                 '.cook-cascader input',
+                '.cook-cascader-dropdown input',
+                'input[class*="search"]',
             ]
             
             search_input = None
-            for selector in search_selectors:
-                try:
-                    elem = page.locator(selector).first
-                    if await elem.is_visible(timeout=2000):
-                        search_input = elem
-                        break
-                except:
-                    continue
+            for _ in range(3):  # 最多等待1.5秒
+                for selector in search_selectors:
+                    try:
+                        elem = page.locator(selector).first
+                        if await elem.is_visible(timeout=500):
+                            search_input = elem
+                            break
+                    except:
+                        continue
+                if search_input:
+                    break
+                await asyncio.sleep(0.5)
             
             if not search_input:
                 return {'success': False, 'reason': '未找到搜索框'}
             
-            await search_input.fill('')
-            await search_input.fill(shop_name)
-            await asyncio.sleep(3)  # 搜索后多等待，让下拉列表完全加载
+            # ========== 步骤2: 搜索门店 ==========
+            # 使用更短的关键字搜索，提高速度
+            search_keyword = short_name
             
-            # 步骤3: 点击搜索结果并检测门店状态
+            # 清空并输入搜索关键字
+            await search_input.fill('')
+            await search_input.fill(search_keyword)
+            
+            # 智能等待：等待搜索结果出现，最多2秒
             result_selectors = [
                 f'.cook-cascader-dropdown li:has-text("{short_name}")',
                 f'li[class*="option"]:has-text("{short_name}")',
                 f'div[class*="option"]:has-text("{short_name}")',
+                f'.cook-cascader-dropdown [class*="item"]:has-text("{short_name}")',
+                f'[class*="dropdown"] li:has-text("{short_name}")',
             ]
             
             shop_status = '营业中'
-            for selector in result_selectors:
+            result_elem = None
+            
+            for _ in range(4):  # 最多等待2秒
+                for selector in result_selectors:
+                    try:
+                        elem = page.locator(selector).first
+                        if await elem.is_visible(timeout=500):
+                            result_elem = elem
+                            break
+                    except:
+                        continue
+                if result_elem:
+                    break
+                await asyncio.sleep(0.5)
+            
+            # ========== 步骤3: 点击搜索结果 ==========
+            if result_elem:
                 try:
-                    elem = page.locator(selector).first
-                    if await elem.is_visible(timeout=2000):
-                        # 检查门店状态（休息中/已下线/已打烊/未营业）
-                        elem_text = await elem.inner_text()
-                        if any(kw in elem_text for kw in ['休息中', '已下线', '已打烊', '未营业', '暂停营业']):
-                            if '已下线' in elem_text:
-                                shop_status = '已下线'
-                            elif '已打烊' in elem_text or '未营业' in elem_text or '暂停营业' in elem_text:
-                                shop_status = '已打烊'
-                            else:
-                                shop_status = '休息中'
-                        await elem.click()
-                        await asyncio.sleep(3)
-                        
-                        # 验证切换是否成功
-                        verified, current_shop = await self._verify_shop_switched(page, shop_name)
-                        if verified:
-                            return {'success': True, 'shop_status': shop_status, 'verified': True}
+                    # 检查门店状态
+                    elem_text = await result_elem.inner_text()
+                    if any(kw in elem_text for kw in ['休息中', '已下线', '已打烊', '未营业', '暂停营业']):
+                        if '已下线' in elem_text:
+                            shop_status = '已下线'
+                        elif '已打烊' in elem_text or '未营业' in elem_text or '暂停营业' in elem_text:
+                            shop_status = '已打烊'
                         else:
-                            current_short = self._simplify_shop_name(current_shop) if current_shop else '未知'
-                            return {'success': False, 'reason': f'门店切换验证失败，当前是[{current_short}]', 'shop_status': shop_status}
+                            shop_status = '休息中'
+                    
+                    await result_elem.click()
                 except:
-                    continue
-            
-            # 备用：按Enter键
-            await search_input.press('Enter')
-            await asyncio.sleep(3)
-            
-            # 验证切换是否成功
-            verified, current_shop = await self._verify_shop_switched(page, shop_name)
-            if verified:
-                return {'success': True, 'shop_status': shop_status, 'verified': True}
+                    pass
             else:
-                current_short = self._simplify_shop_name(current_shop) if current_shop else '未知'
-                return {'success': False, 'reason': f'门店切换验证失败，当前是[{current_short}]', 'shop_status': shop_status}
+                # 备用：按Enter键
+                await search_input.press('Enter')
+            
+            # 智能等待：快速轮询验证门店切换
+            # 最多等待2.5秒（5次 * 0.5秒）
+            for i in range(5):
+                # 前4次静默验证，最后1次输出日志
+                silent = (i < 4)
+                verified, current_shop = await self._verify_shop_switched(page, shop_name, silent=silent)
+                if verified:
+                    if silent:
+                        self.log(f"   ✓ 门店切换成功: {short_name}")
+                    return {'success': True, 'shop_status': shop_status, 'verified': True}
+                await asyncio.sleep(0.5)
+            
+            # 验证失败
+            current_short = self._simplify_shop_name(current_shop) if current_shop else '未知'
+            return {'success': False, 'reason': f'门店切换验证失败，当前是[{current_short}]', 'shop_status': shop_status}
             
         except Exception as e:
             return {'success': False, 'reason': str(e)}
@@ -1059,7 +1113,7 @@ class PlaywrightMonitor:
                     if attempt < max_retries:
                         self.log(f"[P{page_id}] 🔄 切换失败({last_reason})，第{attempt+2}次尝试...")
                         await self._ensure_goods_page(page)
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(1)  # 优化：减少重试间隔
                     else:
                         self.log(f"[P{page_id}] ✗ 切换失败(重试{max_retries}次): {last_reason}")
                         self.log(f"[P{page_id}] 🔓 释放锁")
@@ -1079,7 +1133,7 @@ class PlaywrightMonitor:
                 if attempt < max_retries:
                     self.log(f"[P{page_id}] 🔄 切换失败({last_reason})，第{attempt+2}次尝试...")
                     await self._ensure_goods_page(page)
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(1)  # 优化：减少重试间隔
                 else:
                     return False, {'reason': f"切换失败(重试{max_retries}次): {last_reason}"}
         
