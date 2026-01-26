@@ -86,18 +86,48 @@ class ParallelMonitor:
             use_main_browser: 是否使用主浏览器（worker_id=0时）
         """
         from selenium_fetcher import SeleniumGoodsFetcher
+        import shutil
         
         # 计算该worker使用的端口
         debug_port = self.base_debug_port if use_main_browser else self.base_debug_port + worker_id
         
-        # 创建fetcher（共享cookies目录，但使用不同端口）
+        # 每个worker使用独立的profile目录
+        if use_main_browser:
+            worker_profile_dir = self.profile_dir
+        else:
+            # 为worker创建独立的profile目录（复制主profile以复用登录状态）
+            worker_profile_dir = f"{self.profile_dir}_worker_{worker_id}"
+            
+            # 如果worker的profile目录不存在，从主profile复制
+            if not os.path.exists(worker_profile_dir) and os.path.exists(self.profile_dir):
+                try:
+                    # 只复制关键的登录文件，避免复制整个目录（太大）
+                    os.makedirs(worker_profile_dir, exist_ok=True)
+                    # 复制 Default 目录中的 Cookies 和 Login Data
+                    default_src = os.path.join(self.profile_dir, 'Default')
+                    default_dst = os.path.join(worker_profile_dir, 'Default')
+                    if os.path.exists(default_src):
+                        shutil.copytree(default_src, default_dst, 
+                                       ignore=shutil.ignore_patterns('Cache*', 'Code Cache', 'GPUCache', 
+                                                                    'Service Worker', 'blob_storage', 
+                                                                    'IndexedDB', 'Local Storage'))
+                    # 复制 Local State 文件
+                    local_state_src = os.path.join(self.profile_dir, 'Local State')
+                    if os.path.exists(local_state_src):
+                        shutil.copy2(local_state_src, worker_profile_dir)
+                except Exception as e:
+                    logger.warning(f"Worker {worker_id} 复制profile失败: {e}")
+                    # 如果复制失败，使用空目录（需要重新登录）
+                    os.makedirs(worker_profile_dir, exist_ok=True)
+        
+        # 创建fetcher
         fetcher = SeleniumGoodsFetcher(
             shop_id=self.config.shop_id,
             chain_id=self.config.chain_id,
             base_url=self.config.base_url,
             headless=self.config.headless,
             debug_port=debug_port,
-            user_data_dir=self.profile_dir,  # 共享登录状态
+            user_data_dir=worker_profile_dir,  # 每个worker独立的profile目录
             browser_path=self.config.browser_path or None,
             auto_launch_browser=True,
         )
