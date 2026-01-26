@@ -781,35 +781,57 @@ class SeleniumGoodsFetcher:
                 return result
             
             self._log(f"   步骤1: ✓ 已点击下拉按钮 ({click_result.get('method', '')})")
-            time.sleep(1.5)
+            time.sleep(2.0)  # 增加等待时间，确保下拉菜单完全展开
             
             # ========== 步骤2: 在搜索框中输入关键字 ==========
+            # 使用带重试的搜索框查找逻辑
             search_input = None
-            try:
-                # 优先使用 placeholder 精确匹配
-                selectors = [
-                    'input[placeholder*="搜索店铺"]',
-                    'input[placeholder*="搜索"]',
-                    'input[placeholder*="店铺"]',
-                ]
-                for selector in selectors:
-                    try:
-                        inputs = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                        for inp in inputs:
-                            if inp.is_displayed() and inp.is_enabled():
-                                rect = self.driver.execute_script(
-                                    "var r = arguments[0].getBoundingClientRect(); return {top: r.top};",
-                                    inp
-                                )
-                                if rect['top'] > 30 and rect['top'] < 200:
-                                    search_input = inp
-                                    break
-                    except:
-                        continue
+            max_search_attempts = 5  # 最多尝试5次查找搜索框
+            
+            for search_attempt in range(max_search_attempts):
+                try:
+                    # 优先使用 placeholder 精确匹配
+                    selectors = [
+                        'input[placeholder*="搜索店铺"]',
+                        'input[placeholder*="搜索"]',
+                        'input[placeholder*="店铺"]',
+                        'input.cook-input',  # 备用选择器
+                        '.cook-cascader input',  # 级联选择器中的输入框
+                    ]
+                    for selector in selectors:
+                        try:
+                            inputs = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                            for inp in inputs:
+                                if inp.is_displayed() and inp.is_enabled():
+                                    rect = self.driver.execute_script(
+                                        "var r = arguments[0].getBoundingClientRect(); return {top: r.top};",
+                                        inp
+                                    )
+                                    # 放宽位置限制，允许 top 在 30-300 范围内
+                                    if rect['top'] > 30 and rect['top'] < 300:
+                                        search_input = inp
+                                        break
+                        except:
+                            continue
+                        if search_input:
+                            break
+                    
                     if search_input:
                         break
-            except Exception as e:
-                self._log(f"   查找搜索框出错: {e}")
+                    
+                    # 如果没找到，等待后重试
+                    if search_attempt < max_search_attempts - 1:
+                        time.sleep(0.5)
+                        # 尝试重新点击下拉框
+                        if search_attempt == 2:
+                            try:
+                                self.driver.execute_script(js_click_dropdown)
+                                time.sleep(1.5)
+                            except:
+                                pass
+                except Exception as e:
+                    if search_attempt == max_search_attempts - 1:
+                        self._log(f"   查找搜索框出错: {e}")
             
             if search_input:
                 # 使用多种方式尝试输入，处理元素不可交互的情况

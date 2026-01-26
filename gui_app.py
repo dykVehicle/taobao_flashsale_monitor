@@ -1476,18 +1476,29 @@ class MainWindow(QMainWindow):
                     md_lines.append(f"> • {short_name}: 下架{off_count}/售罄{sold_count} ({shop_dur:.0f}秒)")
                 md_lines.append("")
             
-            # 跳过的门店
+            # 跳过的门店（精简显示，避免超过微信4096字符限制）
             if skipped_shops:
-                md_lines.append(f"**⏸ 跳过的门店**")
+                md_lines.append(f"**⏸ 跳过的门店 ({len(skipped_shops)}个)**")
+                
+                # 按跳过原因分组统计
+                reason_count = {}
                 for skip in skipped_shops:
-                    short_name = skip.get('short_name', '')
-                    if not short_name:
-                        short_name = simplify_shop_name(skip.get('name', '未知'))
-                    reason = skip.get('reason', '')
-                    status = skip.get('status', '')
-                    skip_dur = skip.get('duration', 0)
-                    md_lines.append(f"> • <font color=\"warning\">{short_name}</font> ({skip_dur:.0f}秒)")
-                    md_lines.append(f">   {status}: {reason}")
+                    reason = skip.get('reason', '未知原因')
+                    reason_count[reason] = reason_count.get(reason, 0) + 1
+                
+                # 显示原因统计
+                for reason, count in reason_count.items():
+                    md_lines.append(f"> • {reason}: {count}个门店")
+                
+                # 如果跳过门店较少（<=8个），显示具体名称
+                if len(skipped_shops) <= 8:
+                    md_lines.append("> ---")
+                    for skip in skipped_shops:
+                        short_name = skip.get('short_name', '')
+                        if not short_name:
+                            short_name = simplify_shop_name(skip.get('name', '未知'))
+                        md_lines.append(f"> {short_name}")
+                
                 md_lines.append("")
             
             md_lines.append(f"---")
