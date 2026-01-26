@@ -5,6 +5,7 @@ lxml>=4.9.0
 openpyxl>=3.0.10
 schedule>=1.1.0
 selenium>=4.8.0
+playwright>=1.40.0
 
 # GUI依赖
 PyQt6>=6.4.0

@@ -70,9 +70,9 @@ class AppConfig:
     shop_list_last_update: str = ""  # 上一次更新时间
     shop_list_history: str = ""  # 历史记录（JSON格式）
     
-    # 并行监控配置
-    parallel_workers: int = 20  # 并行worker数量，默认20个
-    enable_parallel: bool = True  # 是否启用并行监控
+    # 并行监控配置（使用Playwright单浏览器多页面实现真正并行）
+    parallel_workers: int = 5  # 并行页面数量，默认5个
+    enable_parallel: bool = True  # 默认开启（Playwright同浏览器内共享登录状态）
 
 
 class ConfigManager:

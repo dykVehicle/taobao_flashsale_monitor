@@ -68,17 +68,21 @@ class MonitorWorker(QThread):
     
     def __init__(self, config: AppConfig, profile_dir: str, auto_fill_login: bool = False, 
                  shops: List[ShopInfo] = None, check_interval: int = 30,
-                 enable_parallel: bool = True, parallel_workers: int = 20):
+                 enable_parallel: bool = True, parallel_workers: int = 20,
+                 only_open_shops: bool = False, retry_timeout_minutes: int = 10):
         super().__init__()
         self.config = config
         self.profile_dir = profile_dir
         self.auto_fill_login = auto_fill_login
         self.shops = shops or []  # 门店列表
+        self.retry_timeout_minutes = retry_timeout_minutes  # 重试超时时间
         self.check_interval = check_interval  # 监控间隔（分钟）
         self.enable_parallel = enable_parallel  # 是否启用并行监控
         self.parallel_workers = parallel_workers  # 并行worker数量
+        self.only_open_shops = only_open_shops  # 只监控营业中的门店
         self.running = True
         self.fetcher = None
+        self.pw_monitor = None  # Playwright监控器
         self._is_cleaning_up = False
     
     def log(self, msg: str):
@@ -195,26 +199,18 @@ class MonitorWorker(QThread):
                 self.log(f"")
                 self.log(f"⏰ 下一轮监控将在 {self.check_interval} 分钟后开始")
                 
-                # 每30秒更新一次倒计时
+                # 每秒更新倒计时
                 remaining = interval_seconds
                 while remaining > 0 and self.running:
-                    if remaining <= 60:
-                        # 最后一分钟每10秒更新
-                        self.status_signal.emit(f"倒计时: {remaining}秒")
-                        sleep_time = min(10, remaining)
-                    elif remaining <= 300:
-                        # 最后5分钟每分钟更新
-                        mins = remaining // 60
-                        secs = remaining % 60
-                        self.status_signal.emit(f"倒计时: {mins}分{secs}秒")
-                        sleep_time = 30
+                    mins = remaining // 60
+                    secs = remaining % 60
+                    if mins > 0:
+                        self.status_signal.emit(f"⏳ 倒计时: {mins}分{secs:02d}秒")
                     else:
-                        mins = remaining // 60
-                        self.status_signal.emit(f"倒计时: {mins}分钟")
-                        sleep_time = 60
+                        self.status_signal.emit(f"⏳ 倒计时: {secs}秒")
                     
-                    time.sleep(sleep_time)
-                    remaining -= sleep_time
+                    time.sleep(1)
+                    remaining -= 1
                 
                 round_num += 1
             
@@ -302,16 +298,23 @@ class MonitorWorker(QThread):
                     off_count = len(sr.get('off_sale', []))
                     sold_count = len(sr.get('sold_out', []))
                     shop_dur = sr.get('duration', 0)
-                    self.log(f"   • {short_name}: 下架{off_count}/售罄{sold_count} ({shop_dur:.1f}秒)")
+                    shop_status = sr.get('shop_status', '营业中')
+                    status_text = "[营业]" if shop_status == "营业中" else f"[{shop_status}]"
+                    self.log(f"   • {short_name} {status_text}: 下架{off_count}/售罄{sold_count} ({shop_dur:.1f}秒)")
             
             # 显示跳过的门店详情
             if all_results['skipped_shops']:
                 self.log(f"")
                 self.log(f"⏸ 跳过的门店列表:")
                 for skip in all_results['skipped_shops']:
-                    short_name = skip.get('short_name', simplify_shop_name(skip['name']))
+                    short_name = skip.get('short_name', simplify_shop_name(skip.get('name', '未知')))
                     skip_dur = skip.get('duration', 0)
-                    self.log(f"   • {short_name} [{skip['status']}] - {skip['reason']} ({skip_dur:.1f}秒)")
+                    status = skip.get('status', '')
+                    reason = skip.get('reason', '未知原因')
+                    if status:
+                        self.log(f"   • {short_name} [{status}] - {reason} ({skip_dur:.1f}秒)")
+                    else:
+                        self.log(f"   • {short_name} - {reason}")
             
             self.log(f"{'='*50}")
             
@@ -328,34 +331,54 @@ class MonitorWorker(QThread):
             })
     
     def _run_parallel_monitor(self, log_callback):
-        """并行监控模式"""
-        from parallel_monitor import ParallelMonitor
+        """并行监控模式 - 使用Playwright实现真正的并行"""
+        try:
+            from playwright_monitor import PlaywrightMonitor
+        except ImportError as e:
+            self.log(f"⚠ Playwright未安装，回退到串行模式")
+            self.log(f"   请运行: pip install playwright && playwright install chromium")
+            return self._run_serial_monitor(log_callback)
         
         self.log(f"")
-        self.log(f"🚀 使用并行监控模式 (Workers: {self.parallel_workers})")
+        self.log(f"🚀 使用Playwright并行监控模式 (并行页面: {self.parallel_workers})")
+        if self.only_open_shops:
+            self.log(f"   ⏭ 只监控营业中的门店")
         
-        # 创建并行监控器
-        parallel_monitor = ParallelMonitor(
-            num_workers=self.parallel_workers,
-            base_debug_port=self.config.debug_port,
-            config=self.config,
-            profile_dir=self.profile_dir,
-            log_callback=log_callback,
-        )
-        
-        # 定义发送通知的回调
-        def send_notification(shop, off_sale, sold_out, shop_status):
-            if shop.webhook and (off_sale or sold_out):
-                self._send_shop_notification(shop, off_sale, sold_out, shop_status)
-        
-        # 运行并行监控
-        all_results = parallel_monitor.run_parallel_monitor(
-            shops=self.shops,
-            main_fetcher=self.fetcher,  # 主浏览器已登录
-            send_notification_callback=send_notification,
-        )
-        
-        return all_results
+        try:
+            # 创建Playwright并行监控器
+            self.pw_monitor = PlaywrightMonitor(
+                num_workers=self.parallel_workers,
+                config=self.config,
+                log_callback=log_callback,
+                only_open_shops=self.only_open_shops,
+                retry_timeout_minutes=self.retry_timeout_minutes,
+            )
+            
+            # 定义发送通知的回调（包含耗时参数）
+            def send_notification(shop, off_sale, sold_out, shop_status, duration=0):
+                if shop.webhook and (off_sale or sold_out):
+                    self._send_shop_notification(shop, off_sale, sold_out, shop_status, duration)
+            
+            # 运行并行监控
+            all_results = self.pw_monitor.run_parallel_monitor(
+                shops=self.shops,
+                send_notification_callback=send_notification,
+            )
+            
+            # 检查是否所有门店都被跳过（说明Playwright安装失败）
+            if all_results['shops_monitored'] == 0 and all_results['shops_skipped'] == len(self.shops):
+                # 检查是否是因为Playwright未安装
+                skip_reasons = [s.get('reason', '') for s in all_results.get('skipped_shops', [])]
+                if any('Playwright' in r or '未安装' in r for r in skip_reasons):
+                    self.log(f"")
+                    self.log(f"⚠ Playwright不可用，自动回退到串行监控模式...")
+                    return self._run_serial_monitor(log_callback)
+            
+            return all_results
+        except Exception as e:
+            self.log(f"⚠ Playwright监控出错: {e}")
+            self.log(f"   回退到串行模式...")
+            return self._run_serial_monitor(log_callback)
     
     def _run_serial_monitor(self, log_callback):
         """串行监控模式（原有逻辑）"""
@@ -503,16 +526,16 @@ class MonitorWorker(QThread):
             self.status_signal.emit("完成")
             self.finished_signal.emit(result)
     
-    def _send_shop_notification(self, shop: ShopInfo, off_sale_list, sold_out_list, shop_status: str = "营业中"):
+    def _send_shop_notification(self, shop: ShopInfo, off_sale_list, sold_out_list, shop_status: str = "营业中", duration: float = 0):
         """发送单店通知"""
         import requests
         from selenium_fetcher import SeleniumGoodsFetcher
         
         try:
-            # 生成消息（包含营业状态）
+            # 生成消息（包含营业状态和耗时）
             try:
                 msg_body = SeleniumGoodsFetcher.format_wecom_markdown(
-                    shop.name, off_sale_list, sold_out_list, shop_status
+                    shop.name, off_sale_list, sold_out_list, shop_status, duration
                 )
             except:
                 text_msg = SeleniumGoodsFetcher.format_wecom_message(
@@ -632,15 +655,36 @@ class MonitorWorker(QThread):
         except Exception as e:
             self.log(f"自动登录失败: {e}，请手动登录")
     
-    def stop(self):
-        """停止线程"""
+    def stop(self, close_browser: bool = False):
+        """
+        停止监控线程
+        
+        Args:
+            close_browser: 是否关闭浏览器。
+                          False = 暂停监控，保留浏览器（下次可快速恢复）
+                          True = 完全停止，关闭浏览器（退出程序时使用）
+        """
         if not self.running: return
         self.running = False
-        self.log("正在停止...")
+        
+        if close_browser:
+            self.log("正在停止并关闭浏览器...")
+        else:
+            self.log("正在暂停监控（浏览器保持运行）...")
         
         # 在独立线程中执行清理，防止阻塞GUI
         def force_stop():
-            if self.fetcher:
+            # 停止Playwright监控器
+            if self.pw_monitor:
+                try:
+                    self.pw_monitor.stop(close_browser=close_browser)
+                except:
+                    pass
+                if close_browser:
+                    self.pw_monitor = None
+            
+            # 停止Selenium（Selenium暂时总是关闭，因为它是独立进程）
+            if close_browser and self.fetcher:
                 try:
                     # 尝试关闭浏览器驱动
                     if self.fetcher.driver:
@@ -669,6 +713,10 @@ class MonitorWorker(QThread):
         
         # 启动守护线程进行清理
         threading.Thread(target=force_stop, daemon=True).start()
+    
+    def stop_and_close_browser(self):
+        """完全停止并关闭浏览器（退出程序时调用）"""
+        self.stop(close_browser=True)
     
     def _cleanup(self):
         """清理资源"""
@@ -749,24 +797,64 @@ class MainWindow(QMainWindow):
                 color: #2f3640;
                 font-size: 12px; /* 稍微减小字体 */
             }
-            QLineEdit, QSpinBox {
-                padding: 5px 8px; /* 减小内边距，防止遮挡按钮 */
-                min-height: 28px; /* 增加最小高度 */
+            QLineEdit {
+                padding: 5px 8px;
+                min-height: 28px;
                 border: 1px solid #dcdde1;
                 border-radius: 6px;
                 background-color: #f5f6fa;
                 color: #2f3640;
                 font-size: 13px;
             }
-            QLineEdit:focus, QSpinBox:focus {
+            QLineEdit:focus {
                 border: 2px solid #0097e6;
                 background-color: #ffffff;
             }
-            /* 确保SpinBox按钮可见 */
-            QSpinBox::up-button, QSpinBox::down-button {
-                width: 20px;
-                background-color: transparent;
+            QSpinBox {
+                padding: 5px 30px 5px 8px; /* 右边留空间给箭头按钮 */
+                min-height: 28px;
+                min-width: 80px;
+                border: 1px solid #dcdde1;
+                border-radius: 6px;
+                background-color: #f5f6fa;
+                color: #2f3640;
+                font-size: 13px;
+            }
+            QSpinBox:focus {
+                border: 2px solid #0097e6;
+                background-color: #ffffff;
+            }
+            /* SpinBox箭头按钮样式 */
+            QSpinBox::up-button {
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 22px;
+                height: 14px;
                 border: none;
+                border-left: 1px solid #dcdde1;
+                border-top-right-radius: 5px;
+                background-color: #ffffff;
+            }
+            QSpinBox::down-button {
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 22px;
+                height: 14px;
+                border: none;
+                border-left: 1px solid #dcdde1;
+                border-bottom-right-radius: 5px;
+                background-color: #ffffff;
+            }
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background-color: #e3f2fd;
+            }
+            QSpinBox::up-arrow {
+                width: 8px;
+                height: 8px;
+            }
+            QSpinBox::down-arrow {
+                width: 8px;
+                height: 8px;
             }
             QPushButton {
                 padding: 8px 16px; /* 减小按钮内边距 */
@@ -1069,21 +1157,39 @@ class MainWindow(QMainWindow):
         self.interval_spin.setSuffix(" 分钟")
         monitor_form.addRow("检查间隔:", self.interval_spin)
         
-        # 并行监控设置
+        # 并行监控设置（使用Playwright实现真正并行）
         parallel_layout = QHBoxLayout()
-        self.parallel_checkbox = QCheckBox("启用并行监控")
+        self.parallel_checkbox = QCheckBox("启用Playwright并行监控")
         self.parallel_checkbox.setChecked(True)
-        self.parallel_checkbox.setToolTip("同时使用多个浏览器实例监控不同门店，大幅提升监控速度")
+        self.parallel_checkbox.setToolTip("使用Playwright在同一浏览器中打开多个页面并行监控\n所有页面共享登录状态，实现真正的并行")
         parallel_layout.addWidget(self.parallel_checkbox)
         
         self.parallel_workers_spin = QSpinBox()
-        self.parallel_workers_spin.setRange(1, 50)
-        self.parallel_workers_spin.setValue(20)
-        self.parallel_workers_spin.setSuffix(" 个Worker")
-        self.parallel_workers_spin.setToolTip("并行浏览器实例数量，每个Worker监控不同的门店")
+        self.parallel_workers_spin.setRange(1, 10)
+        self.parallel_workers_spin.setValue(5)
+        self.parallel_workers_spin.setSuffix(" 个页面")
+        self.parallel_workers_spin.setToolTip("并行页面数量\n建议：3-5个页面效果最佳")
         parallel_layout.addWidget(self.parallel_workers_spin)
         parallel_layout.addStretch()
         monitor_form.addRow("并行监控:", parallel_layout)
+        
+        # 门店筛选设置
+        self.only_open_shops_checkbox = QCheckBox("只监控营业中的门店")
+        self.only_open_shops_checkbox.setChecked(False)
+        self.only_open_shops_checkbox.setToolTip("勾选后将跳过休息中/已下线的门店\n只监控正在营业的门店")
+        monitor_form.addRow("门店筛选:", self.only_open_shops_checkbox)
+        
+        # 重试超时设置
+        retry_timeout_layout = QHBoxLayout()
+        self.retry_timeout_spinbox = QSpinBox()
+        self.retry_timeout_spinbox.setRange(1, 60)
+        self.retry_timeout_spinbox.setValue(10)
+        self.retry_timeout_spinbox.setSuffix(" 分钟")
+        self.retry_timeout_spinbox.setToolTip("失败门店重试的最大时间限制\n超过此时间将停止重试\n建议：10-30分钟")
+        self.retry_timeout_spinbox.setFixedWidth(100)
+        retry_timeout_layout.addWidget(self.retry_timeout_spinbox)
+        retry_timeout_layout.addStretch()
+        monitor_form.addRow("重试超时:", retry_timeout_layout)
         
         export_layout = QHBoxLayout()
         self.export_dir_input = QLineEdit()
@@ -1241,7 +1347,13 @@ class MainWindow(QMainWindow):
         
         # 加载并行监控配置
         self.parallel_checkbox.setChecked(getattr(self.config, 'enable_parallel', True))
-        self.parallel_workers_spin.setValue(getattr(self.config, 'parallel_workers', 20))
+        self.parallel_workers_spin.setValue(getattr(self.config, 'parallel_workers', 5))
+        
+        # 加载门店筛选配置
+        self.only_open_shops_checkbox.setChecked(getattr(self.config, 'only_open_shops', False))
+        
+        # 加载重试超时配置
+        self.retry_timeout_spinbox.setValue(getattr(self.config, 'retry_timeout_minutes', 10))
         
         # 加载上一次的门店列表路径
         if self.config.shop_list_file:
@@ -1272,6 +1384,12 @@ class MainWindow(QMainWindow):
         # 保存并行监控配置
         self.config.enable_parallel = self.parallel_checkbox.isChecked()
         self.config.parallel_workers = self.parallel_workers_spin.value()
+        
+        # 保存门店筛选配置
+        self.config.only_open_shops = self.only_open_shops_checkbox.isChecked()
+        
+        # 保存重试超时配置
+        self.config.retry_timeout_minutes = self.retry_timeout_spinbox.value()
     
     def save_config(self):
         """保存配置"""
@@ -1326,6 +1444,8 @@ class MainWindow(QMainWindow):
             check_interval=self.config.check_interval,  # 监控间隔（分钟）
             enable_parallel=getattr(self.config, 'enable_parallel', True),
             parallel_workers=getattr(self.config, 'parallel_workers', 20),
+            only_open_shops=getattr(self.config, 'only_open_shops', False),
+            retry_timeout_minutes=getattr(self.config, 'retry_timeout_minutes', 10),
         )
         
         self.worker.log_signal.connect(self.log)
@@ -1338,16 +1458,16 @@ class MainWindow(QMainWindow):
         self.worker.start()
     
     def stop_monitor(self):
-        """停止监控"""
+        """停止监控（暂停，不关闭浏览器）"""
         if self.worker:
-            self.worker.stop()
+            self.worker.stop(close_browser=False)  # 暂停时不关闭浏览器
             # 不再阻塞等待，让 worker 的 force_stop 线程去处理
             # self.worker.wait(5000)
         
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.log("监控已停止")
-        self.statusBar().showMessage("已停止")
+        self.log("监控已暂停（浏览器保持运行）")
+        self.statusBar().showMessage("已暂停")
     
     def on_shop_result(self, result: dict):
         """单个门店监控结果"""
@@ -1420,7 +1540,7 @@ class MainWindow(QMainWindow):
         off_count = len(off_sale_list)
         sold_count = len(sold_out_list)
         
-        self.log(f"⚠️ 【商品异常提醒】")
+        self.log(f"🔔 【商品状态提醒】")
         self.log(f"📍 {shop_name}")
         self.log(f"⏰ {now}")
         self.log("")
@@ -1488,6 +1608,36 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(f"✗ 发送企业微信通知出错: {e}")
     
+    def _simplify_skip_reason(self, reason: str) -> str:
+        """简化跳过原因，避免显示完整错误信息"""
+        if not reason:
+            return "未知原因"
+        
+        # 常见原因简化映射
+        simplify_map = {
+            'Timeout': '页面加载超时',
+            'timeout': '页面加载超时',
+            '未找到门店下拉按钮': '门店切换失败',
+            '未找到搜索框': '门店切换失败',
+            '切换失败': '门店切换失败',
+            '门店休息中': '门店休息中',
+            '门店已下线': '门店已下线',
+            '未营业': '门店未营业',
+            'navigation': '页面导航失败',
+            'PlaywrightMonitor': '监控超时',
+        }
+        
+        # 检查是否匹配任何简化规则
+        for key, simple in simplify_map.items():
+            if key in reason:
+                return simple
+        
+        # 如果原因太长，截取前20个字符
+        if len(reason) > 20:
+            return reason[:20] + '...'
+        
+        return reason
+    
     def _send_multi_shop_summary(self, all_results: dict):
         """发送多门店监控总结到默认 webhook"""
         import requests
@@ -1527,30 +1677,35 @@ class MainWindow(QMainWindow):
             md_lines.append(f"> 🔴 总售罄：{total_sold_out} 个商品")
             md_lines.append("")
             
-            # 成功监控的门店
+            # 成功监控的门店（增加营业状态）
             if shop_results:
                 md_lines.append(f"**✅ 成功监控的门店**")
                 for sr in shop_results:
                     off_count = len(sr.get('off_sale', []))
                     sold_count = len(sr.get('sold_out', []))
                     shop_dur = sr.get('duration', 0)
+                    shop_status = sr.get('shop_status', '营业中')
                     short_name = sr.get('short_name', '')
                     if not short_name:
                         shop = sr.get('shop')
                         shop_name = shop.name if shop else sr.get('shop_name', '未知')
                         short_name = simplify_shop_name(shop_name)
-                    md_lines.append(f"> • {short_name}: 下架{off_count}/售罄{sold_count} ({shop_dur:.0f}秒)")
+                    # 营业状态文字
+                    status_text = "[营业]" if shop_status == "营业中" else f"[{shop_status}]"
+                    md_lines.append(f"> • {short_name} {status_text}: 下架{off_count}/售罄{sold_count} ({shop_dur:.0f}秒)")
                 md_lines.append("")
             
             # 跳过的门店（精简显示，避免超过微信4096字符限制）
             if skipped_shops:
                 md_lines.append(f"**⏸ 跳过的门店 ({len(skipped_shops)}个)**")
                 
-                # 按跳过原因分组统计
+                # 简化跳过原因并按原因分组统计
                 reason_count = {}
                 for skip in skipped_shops:
-                    reason = skip.get('reason', '未知原因')
-                    reason_count[reason] = reason_count.get(reason, 0) + 1
+                    raw_reason = skip.get('reason', '未知原因')
+                    # 简化错误原因
+                    simplified_reason = self._simplify_skip_reason(raw_reason)
+                    reason_count[simplified_reason] = reason_count.get(simplified_reason, 0) + 1
                 
                 # 显示原因统计
                 for reason, count in reason_count.items():
@@ -1733,9 +1888,10 @@ class MainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """关闭窗口"""
-        # 如果监控正在运行，直接停止（不提示确认）
+        # 如果监控正在运行，完全停止并关闭浏览器
         if self.worker and self.worker.isRunning():
-            self.stop_monitor()
+            self.worker.stop_and_close_browser()  # 退出程序时关闭浏览器
+            self.worker.wait(3000)  # 等待最多3秒
         
         # 保存配置
         self.save_ui_to_config()

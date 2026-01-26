@@ -1961,7 +1961,7 @@ class SeleniumGoodsFetcher:
         lines = []
         
         # 标题区
-        lines.append(f"⚠️ 【商品异常提醒】")
+        lines.append(f"🔔 【商品状态提醒】")
         lines.append(f"📍 {shop_name}")
         lines.append(f"🏪 {shop_status}")
         lines.append(f"⏰ {now}")
@@ -1997,7 +1997,8 @@ class SeleniumGoodsFetcher:
         shop_name: str,
         off_sale_goods: List[GoodsItem],
         sold_out_goods: List[GoodsItem],
-        shop_status: str = "营业中",  # 新增：门店营业状态
+        shop_status: str = "营业中",  # 门店营业状态
+        duration: float = 0,  # 监控耗时（秒）
     ) -> dict:
         """
         格式化企业微信 Markdown 格式消息（更精美）
@@ -2007,6 +2008,7 @@ class SeleniumGoodsFetcher:
             off_sale_goods: 已下架商品列表
             sold_out_goods: 已售罄商品列表
             shop_status: 门店营业状态（营业中/已打烊等）
+            duration: 监控耗时（秒）
         
         Returns:
             企业微信机器人消息体 dict
@@ -2019,6 +2021,9 @@ class SeleniumGoodsFetcher:
         
         # 营业状态颜色
         status_color = "info" if shop_status == "营业中" else "warning"
+        
+        # 格式化耗时
+        duration_str = f"{int(duration)}秒" if duration > 0 else ""
         
         if total == 0:
             content = f"### ✅ 商品状态正常\n" \
@@ -2033,9 +2038,11 @@ class SeleniumGoodsFetcher:
         
         # 构建 Markdown 内容
         md_lines = []
-        md_lines.append(f"### ⚠️ 商品异常提醒")
+        md_lines.append(f"### 🔔 商品状态提醒")
         md_lines.append(f"> 门店：<font color=\"info\">{shop_name}</font>")
         md_lines.append(f"> 状态：<font color=\"{status_color}\">{shop_status}</font>")
+        if duration_str:
+            md_lines.append(f"> 耗时：{duration_str}")
         md_lines.append(f"> 时间：{now}")
         md_lines.append("")
         

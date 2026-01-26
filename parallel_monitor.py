@@ -67,6 +67,9 @@ class ParallelMonitor:
         self.running = True
         self.results_queue = Queue()
         self._lock = threading.Lock()
+        self.main_cookies = []  # 主浏览器的cookies
+        self.main_local_storage = {}  # 主浏览器的localStorage
+        self.main_session_storage = {}  # 主浏览器的sessionStorage
         
     def log(self, msg: str):
         """输出日志"""
@@ -86,7 +89,6 @@ class ParallelMonitor:
             use_main_browser: 是否使用主浏览器（worker_id=0时）
         """
         from selenium_fetcher import SeleniumGoodsFetcher
-        import shutil
         
         # 计算该worker使用的端口
         debug_port = self.base_debug_port if use_main_browser else self.base_debug_port + worker_id
@@ -95,30 +97,9 @@ class ParallelMonitor:
         if use_main_browser:
             worker_profile_dir = self.profile_dir
         else:
-            # 为worker创建独立的profile目录（复制主profile以复用登录状态）
+            # Worker使用独立的profile目录（会通过cookie注入获取登录状态）
             worker_profile_dir = f"{self.profile_dir}_worker_{worker_id}"
-            
-            # 如果worker的profile目录不存在，从主profile复制
-            if not os.path.exists(worker_profile_dir) and os.path.exists(self.profile_dir):
-                try:
-                    # 只复制关键的登录文件，避免复制整个目录（太大）
-                    os.makedirs(worker_profile_dir, exist_ok=True)
-                    # 复制 Default 目录中的 Cookies 和 Login Data
-                    default_src = os.path.join(self.profile_dir, 'Default')
-                    default_dst = os.path.join(worker_profile_dir, 'Default')
-                    if os.path.exists(default_src):
-                        shutil.copytree(default_src, default_dst, 
-                                       ignore=shutil.ignore_patterns('Cache*', 'Code Cache', 'GPUCache', 
-                                                                    'Service Worker', 'blob_storage', 
-                                                                    'IndexedDB', 'Local Storage'))
-                    # 复制 Local State 文件
-                    local_state_src = os.path.join(self.profile_dir, 'Local State')
-                    if os.path.exists(local_state_src):
-                        shutil.copy2(local_state_src, worker_profile_dir)
-                except Exception as e:
-                    logger.warning(f"Worker {worker_id} 复制profile失败: {e}")
-                    # 如果复制失败，使用空目录（需要重新登录）
-                    os.makedirs(worker_profile_dir, exist_ok=True)
+            os.makedirs(worker_profile_dir, exist_ok=True)
         
         # 创建fetcher
         fetcher = SeleniumGoodsFetcher(
@@ -127,12 +108,74 @@ class ParallelMonitor:
             base_url=self.config.base_url,
             headless=self.config.headless,
             debug_port=debug_port,
-            user_data_dir=worker_profile_dir,  # 每个worker独立的profile目录
+            user_data_dir=worker_profile_dir,
             browser_path=self.config.browser_path or None,
             auto_launch_browser=True,
         )
         
         return fetcher
+    
+    def _inject_session_data(self, fetcher, worker_id: int) -> bool:
+        """
+        将主浏览器的cookies、localStorage、sessionStorage注入到新浏览器中
+        
+        Args:
+            fetcher: 目标fetcher实例
+            worker_id: worker编号
+            
+        Returns:
+            是否成功
+        """
+        try:
+            # 先访问目标域名（必须先访问才能添加cookie和storage）
+            fetcher.driver.get(self.config.base_url)
+            time.sleep(2)
+            
+            # 1. 注入cookies
+            cookie_injected = 0
+            if self.main_cookies:
+                for cookie in self.main_cookies:
+                    try:
+                        cookie_to_add = {k: v for k, v in cookie.items() 
+                                        if k in ['name', 'value', 'domain', 'path', 'secure', 'httpOnly', 'expiry']}
+                        fetcher.driver.add_cookie(cookie_to_add)
+                        cookie_injected += 1
+                    except:
+                        pass
+            
+            # 2. 注入localStorage
+            ls_injected = 0
+            if self.main_local_storage:
+                for key, value in self.main_local_storage.items():
+                    try:
+                        # 转义特殊字符
+                        escaped_value = value.replace('\\', '\\\\').replace("'", "\\'").replace('\n', '\\n')
+                        fetcher.driver.execute_script(f"localStorage.setItem('{key}', '{escaped_value}');")
+                        ls_injected += 1
+                    except:
+                        pass
+            
+            # 3. 注入sessionStorage
+            ss_injected = 0
+            if self.main_session_storage:
+                for key, value in self.main_session_storage.items():
+                    try:
+                        escaped_value = value.replace('\\', '\\\\').replace("'", "\\'").replace('\n', '\\n')
+                        fetcher.driver.execute_script(f"sessionStorage.setItem('{key}', '{escaped_value}');")
+                        ss_injected += 1
+                    except:
+                        pass
+            
+            self.log(f"   [Worker-{worker_id}] ✓ 已注入 cookies:{cookie_injected} localStorage:{ls_injected} sessionStorage:{ss_injected}")
+            
+            # 刷新页面使数据生效
+            fetcher.driver.refresh()
+            time.sleep(3)
+            
+            return True
+        except Exception as e:
+            self.log(f"   [Worker-{worker_id}] ✗ 数据注入失败: {e}")
+            return False
     
     def _worker_task(
         self,
@@ -199,11 +242,39 @@ class ParallelMonitor:
                 
                 self.log(f"   [Worker-{worker_id}] ✓ 浏览器就绪")
                 
+                # 注入主浏览器的登录数据（cookies + localStorage + sessionStorage）
+                if not self._inject_session_data(fetcher, worker_id):
+                    self.log(f"   [Worker-{worker_id}] ⚠ 数据注入失败，尝试继续...")
+                
                 # 导航到商品管理页面
                 try:
                     goods_url = f"{fetcher.base_url}/app/shop/{fetcher.shop_id}/food#app.shop.food?path=management"
                     fetcher.driver.get(goods_url)
                     time.sleep(5)
+                    
+                    # 检查登录状态
+                    if fetcher._need_login():
+                        self.log(f"   [Worker-{worker_id}] ⚠ 未登录，重试注入数据...")
+                        # 再次尝试注入
+                        self._inject_session_data(fetcher, worker_id)
+                        fetcher.driver.get(goods_url)
+                        time.sleep(5)
+                        
+                        if fetcher._need_login():
+                            self.log(f"   [Worker-{worker_id}] ✗ 登录失败（数据注入无效）")
+                            for shop in shops:
+                                results.append(WorkerResult(
+                                    worker_id=worker_id,
+                                    shop_name=shop.name,
+                                    short_name=self._simplify_shop_name(shop.name),
+                                    success=False,
+                                    error="未登录",
+                                    skipped=True,
+                                    skip_reason="数据注入无效",
+                                ))
+                            return results
+                    
+                    self.log(f"   [Worker-{worker_id}] ✓ 登录状态正常")
                 except Exception as e:
                     self.log(f"   [Worker-{worker_id}] ⚠ 导航失败: {e}")
                     
@@ -262,7 +333,15 @@ class ParallelMonitor:
                 
                 # 抓取商品数据
                 time.sleep(2)
-                off_sale_list, sold_out_list = fetcher.fetch_abnormal_goods(use_current_page=True)
+                goods_list = fetcher.login_and_fetch(
+                    auto_login=False,
+                    wait_for_login=False,
+                    login_timeout=60,
+                    skip_navigation=True,
+                )
+                # 从商品列表中筛选出已下架和已售罄的商品
+                off_sale_list = [g for g in goods_list if g.status == "OFF_SALE"]
+                sold_out_list = [g for g in goods_list if g.status == "SOLD_OUT"]
                 
                 shop_duration = time.time() - shop_start_time
                 
@@ -378,6 +457,31 @@ class ParallelMonitor:
             汇总的监控结果
         """
         total_shops = len(shops)
+        
+        # 从主浏览器获取cookies、localStorage、sessionStorage（用于注入到新Worker中）
+        if main_fetcher and main_fetcher.driver:
+            try:
+                # 获取cookies
+                self.main_cookies = main_fetcher.driver.get_cookies()
+                
+                # 获取localStorage
+                self.main_local_storage = main_fetcher.driver.execute_script(
+                    "var ls = {}; for(var i=0; i<localStorage.length; i++) { "
+                    "var key = localStorage.key(i); ls[key] = localStorage.getItem(key); } return ls;"
+                ) or {}
+                
+                # 获取sessionStorage  
+                self.main_session_storage = main_fetcher.driver.execute_script(
+                    "var ss = {}; for(var i=0; i<sessionStorage.length; i++) { "
+                    "var key = sessionStorage.key(i); ss[key] = sessionStorage.getItem(key); } return ss;"
+                ) or {}
+                
+                self.log(f"   ✓ 已获取: cookies:{len(self.main_cookies)} localStorage:{len(self.main_local_storage)} sessionStorage:{len(self.main_session_storage)}")
+            except Exception as e:
+                self.log(f"   ⚠ 获取登录数据失败: {e}")
+                self.main_cookies = []
+                self.main_local_storage = {}
+                self.main_session_storage = {}
         
         # 根据门店数量和worker数量，计算实际使用的worker数
         actual_workers = min(self.num_workers, total_shops)
