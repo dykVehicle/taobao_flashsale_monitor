@@ -73,6 +73,10 @@ class AppConfig:
     # 并行监控配置（使用Playwright单浏览器多页面实现真正并行）
     parallel_workers: int = 5  # 并行页面数量，默认5个
     enable_parallel: bool = True  # 默认开启（Playwright同浏览器内共享登录状态）
+    
+    # 多轮重试配置
+    only_open_shops: bool = False  # 只监控营业中的门店
+    retry_timeout_minutes: int = 30  # 多轮重试最大耗时（0-120分钟，0表示不重试）
 
 
 class ConfigManager:

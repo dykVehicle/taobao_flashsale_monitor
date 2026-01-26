@@ -315,6 +315,78 @@ class PlaywrightMonitor:
                 self.log(f"   ⚠ 门店验证异常: {e}")
             return False, ''
     
+    async def _close_popup_dialogs(self, page) -> bool:
+        """
+        关闭页面上可能存在的弹窗/对话框
+        
+        淘宝后台可能弹出各种提示框，如：
+        - "您的店铺已被置为无效状态"
+        - "重要通知"
+        - 其他系统提示
+        
+        Returns:
+            是否关闭了弹窗
+        """
+        try:
+            closed = False
+            
+            # 常见的关闭按钮选择器
+            close_selectors = [
+                # 通用关闭按钮
+                'button:has-text("确认")',
+                'button:has-text("确定")',
+                'button:has-text("知道了")',
+                'button:has-text("我知道了")',
+                'button:has-text("关闭")',
+                '.cook-modal-close',
+                '.cook-dialog-close',
+                '[class*="modal"] [class*="close"]',
+                '[class*="dialog"] [class*="close"]',
+                '[class*="popup"] [class*="close"]',
+                # X 按钮
+                '.cook-modal .cook-icon-close',
+                '[class*="modal"] svg[class*="close"]',
+                '[aria-label="Close"]',
+                '[aria-label="关闭"]',
+            ]
+            
+            for selector in close_selectors:
+                try:
+                    elem = page.locator(selector).first
+                    if await elem.is_visible(timeout=500):
+                        await elem.click()
+                        closed = True
+                        self.log(f"   🔔 关闭弹窗: {selector[:30]}")
+                        await asyncio.sleep(0.5)
+                        break
+                except:
+                    continue
+            
+            # 如果没找到按钮，尝试按 Escape 键关闭
+            if not closed:
+                try:
+                    # 检查是否有遮罩层
+                    mask_selectors = [
+                        '.cook-modal-mask',
+                        '.cook-dialog-mask',
+                        '[class*="modal-mask"]',
+                        '[class*="overlay"]',
+                    ]
+                    for mask_sel in mask_selectors:
+                        mask = page.locator(mask_sel).first
+                        if await mask.is_visible(timeout=300):
+                            await page.keyboard.press('Escape')
+                            closed = True
+                            self.log(f"   🔔 按Escape关闭弹窗")
+                            await asyncio.sleep(0.5)
+                            break
+                except:
+                    pass
+            
+            return closed
+        except:
+            return False
+
     async def _switch_shop(self, page, shop_name: str) -> dict:
         """
         切换到指定门店（优化版）
@@ -324,9 +396,13 @@ class PlaywrightMonitor:
         2. 使用更短的关键字搜索
         3. 更多选择器覆盖
         4. 更快的验证逻辑
+        5. 自动关闭弹窗
         """
         try:
             short_name = self._simplify_shop_name(shop_name)
+            
+            # ========== 步骤0: 关闭可能存在的弹窗 ==========
+            await self._close_popup_dialogs(page)
             
             # ========== 步骤1: 点击门店切换器打开下拉框 ==========
             dropdown_selectors = [
@@ -348,8 +424,44 @@ class PlaywrightMonitor:
                 except:
                     continue
             
+            # 如果点击失败，可能是弹窗遮挡，先尝试关闭弹窗
             if not clicked:
-                return {'success': False, 'reason': '未找到门店下拉按钮'}
+                if await self._close_popup_dialogs(page):
+                    # 关闭弹窗后重试点击
+                    for selector in dropdown_selectors:
+                        try:
+                            elem = page.locator(selector).first
+                            if await elem.is_visible(timeout=1500):
+                                await elem.click()
+                                clicked = True
+                                break
+                        except:
+                            continue
+            
+            # 如果仍然找不到下拉按钮，刷新页面后重试
+            if not clicked:
+                self.log(f"   ⚠ 未找到门店下拉按钮，刷新页面重试...")
+                try:
+                    await page.reload(wait_until='load', timeout=30000)
+                    await asyncio.sleep(2)
+                    await self._close_popup_dialogs(page)
+                    
+                    # 刷新后再次尝试点击下拉按钮
+                    for selector in dropdown_selectors:
+                        try:
+                            elem = page.locator(selector).first
+                            if await elem.is_visible(timeout=2000):
+                                await elem.click()
+                                clicked = True
+                                self.log(f"   ✓ 刷新后找到下拉按钮")
+                                break
+                        except:
+                            continue
+                except Exception as e:
+                    self.log(f"   ✗ 刷新页面失败: {e}")
+            
+            if not clicked:
+                return {'success': False, 'reason': '未找到门店下拉按钮(已尝试刷新)'}
             
             # 智能等待：等待搜索框出现，最多1.5秒
             search_selectors = [
@@ -373,6 +485,29 @@ class PlaywrightMonitor:
                 if search_input:
                     break
                 await asyncio.sleep(0.5)
+            
+            # 如果找不到搜索框，可能下拉框没展开，重新点击下拉按钮
+            if not search_input:
+                self.log(f"   ⚠ 未找到搜索框，重新点击下拉按钮...")
+                for selector in dropdown_selectors:
+                    try:
+                        elem = page.locator(selector).first
+                        if await elem.is_visible(timeout=1000):
+                            await elem.click()
+                            await asyncio.sleep(1)
+                            break
+                    except:
+                        continue
+                
+                # 再次尝试查找搜索框
+                for selector in search_selectors:
+                    try:
+                        elem = page.locator(selector).first
+                        if await elem.is_visible(timeout=1000):
+                            search_input = elem
+                            break
+                    except:
+                        continue
             
             if not search_input:
                 return {'success': False, 'reason': '未找到搜索框'}
@@ -978,6 +1113,12 @@ class PlaywrightMonitor:
         """
         检测页面是否健康（未崩溃）
         返回True表示页面健康，False表示页面崩溃或无响应
+        
+        检测的错误类型：
+        - 页面崩溃 (Aw, Snap!)
+        - 内存不足 (Out of Memory)
+        - 页面无响应
+        - 连接断开
         """
         try:
             # 方法1: 尝试获取页面URL（最快的检测方式）
@@ -1009,12 +1150,41 @@ class PlaywrightMonitor:
                     return False
                 raise
             
-            # 方法3: 检测页面标题是否包含崩溃关键词
+            # 方法3: 检测页面标题是否包含崩溃/错误关键词
             try:
                 title = await page.title()
-                crash_titles = ['崩溃', 'crash', 'aw, snap', '喔唷']
-                if any(ct in title.lower() for ct in crash_titles):
-                    logger.warning(f"[P{page_id}] 页面标题显示崩溃: {title}")
+                error_titles = ['崩溃', 'crash', 'aw, snap', '喔唷', 'out of memory', '内存不足']
+                if any(ct in title.lower() for ct in error_titles):
+                    logger.warning(f"[P{page_id}] 页面标题显示错误: {title}")
+                    return False
+            except:
+                pass
+            
+            # 方法4: 检测页面内容是否包含错误信息（内存不足等）
+            try:
+                error_check_js = '''
+                    (() => {
+                        const body = document.body ? document.body.innerText : '';
+                        const errorKeywords = [
+                            '内存不足', 'Out of Memory', 'out of memory',
+                            '无法打开此网页', '无法显示此页面',
+                            '喔唷，崩溃啦', 'Aw, Snap',
+                            '此网页无法正常运作', 'ERR_'
+                        ];
+                        for (const kw of errorKeywords) {
+                            if (body.includes(kw)) {
+                                return kw;
+                            }
+                        }
+                        return null;
+                    })()
+                '''
+                error_found = await asyncio.wait_for(
+                    page.evaluate(error_check_js),
+                    timeout=5.0
+                )
+                if error_found:
+                    logger.warning(f"[P{page_id}] 页面内容检测到错误: {error_found}")
                     return False
             except:
                 pass
@@ -1058,22 +1228,45 @@ class PlaywrightMonitor:
             self.log(f"[P{page_id}] ✗ 页面恢复失败: {e}")
             return page, False
     
-    async def _refresh_page(self, page, page_id: int) -> bool:
+    async def _refresh_page(self, page, page_id: int, expected_shop_name: str = None) -> bool:
         """
         刷新页面并等待加载完成
-        返回True表示刷新成功
+        
+        Args:
+            page: 页面对象
+            page_id: 页面ID
+            expected_shop_name: 期望的门店名称，如果提供则刷新后验证
+            
+        Returns:
+            True表示刷新成功（且门店验证通过，如果有期望门店）
         """
         try:
             self.log(f"[P{page_id}] 🔄 正在刷新页面...")
             await page.reload(wait_until='load', timeout=60000)
             await asyncio.sleep(3)
             
-            if await self._check_page_health(page, page_id):
-                self.log(f"[P{page_id}] ✓ 页面刷新成功")
-                return True
-            else:
+            # 关闭可能存在的弹窗
+            await self._close_popup_dialogs(page)
+            
+            if not await self._check_page_health(page, page_id):
                 self.log(f"[P{page_id}] ✗ 页面刷新后仍不健康")
                 return False
+            
+            # 如果有期望的门店名称，验证当前门店是否正确
+            if expected_shop_name:
+                verified, current_shop = await self._verify_shop_switched(page, expected_shop_name, silent=True)
+                if verified:
+                    self.log(f"[P{page_id}] ✓ 页面刷新成功，门店验证通过")
+                    return True
+                else:
+                    current_short = self._simplify_shop_name(current_shop) if current_shop else '未知'
+                    expected_short = self._simplify_shop_name(expected_shop_name)
+                    self.log(f"[P{page_id}] ⚠ 页面刷新后门店不匹配: 期望[{expected_short}], 实际[{current_short}]")
+                    # 门店不匹配，需要重新切换
+                    return False
+            
+            self.log(f"[P{page_id}] ✓ 页面刷新成功")
+            return True
         except Exception as e:
             self.log(f"[P{page_id}] ✗ 页面刷新失败: {e}")
             return False
@@ -1150,13 +1343,39 @@ class PlaywrightMonitor:
     ) -> ShopResult:
         """
         并行抓取商品数据（无需锁）
+        
+        包含页面健康检测：如果检测到内存不足等错误，自动刷新并验证门店
         """
         short_name = self._simplify_shop_name(shop.name)
         shop_status = switch_result.get('shop_status', '营业中')
         
         try:
+            # 检测页面健康状态（内存不足等错误）
+            if not await self._check_page_health(page, page_id):
+                self.log(f"[P{page_id}] ⚠ 检测到页面异常，尝试刷新恢复...")
+                
+                # 刷新页面并验证门店
+                refresh_success = await self._refresh_page(page, page_id, expected_shop_name=shop.name)
+                
+                if not refresh_success:
+                    # 刷新失败或门店不匹配，标记为失败
+                    return ShopResult(
+                        shop_name=shop.name,
+                        short_name=short_name,
+                        success=False,
+                        skipped=True,
+                        skip_reason="页面异常恢复失败",
+                        duration=time.time() - shop_start,
+                        shop_status=shop_status,
+                    )
+                
+                self.log(f"[P{page_id}] ✓ 页面恢复成功，继续抓取")
+            
             # 确保页面在商品管理页面
             await self._ensure_goods_page(page)
+            
+            # 关闭可能存在的弹窗
+            await self._close_popup_dialogs(page)
             
             # 抓取商品数据
             self.log(f"[P{page_id}] 📦 开始抓取: {short_name}")

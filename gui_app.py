@@ -69,7 +69,7 @@ class MonitorWorker(QThread):
     def __init__(self, config: AppConfig, profile_dir: str, auto_fill_login: bool = False, 
                  shops: List[ShopInfo] = None, check_interval: int = 30,
                  enable_parallel: bool = True, parallel_workers: int = 20,
-                 only_open_shops: bool = False, retry_timeout_minutes: int = 10):
+                 only_open_shops: bool = False, retry_timeout_minutes: int = 30):
         super().__init__()
         self.config = config
         self.profile_dir = profile_dir
@@ -1179,13 +1179,19 @@ class MainWindow(QMainWindow):
         self.only_open_shops_checkbox.setToolTip("勾选后将跳过休息中/已下线的门店\n只监控正在营业的门店")
         monitor_form.addRow("门店筛选:", self.only_open_shops_checkbox)
         
-        # 重试超时设置
+        # 重试超时设置（多轮重试最大耗时）
         retry_timeout_layout = QHBoxLayout()
         self.retry_timeout_spinbox = QSpinBox()
-        self.retry_timeout_spinbox.setRange(1, 60)
-        self.retry_timeout_spinbox.setValue(10)
+        self.retry_timeout_spinbox.setRange(0, 120)
+        self.retry_timeout_spinbox.setValue(30)
         self.retry_timeout_spinbox.setSuffix(" 分钟")
-        self.retry_timeout_spinbox.setToolTip("失败门店重试的最大时间限制\n超过此时间将停止重试\n建议：10-30分钟")
+        self.retry_timeout_spinbox.setToolTip(
+            "多轮重试的最大时间限制（0-120分钟）\n"
+            "0 = 不重试，仅监控一轮\n"
+            "对因操作失败跳过的门店会自动重试\n"
+            "直到所有门店成功或超时\n"
+            "建议：30分钟"
+        )
         self.retry_timeout_spinbox.setFixedWidth(100)
         retry_timeout_layout.addWidget(self.retry_timeout_spinbox)
         retry_timeout_layout.addStretch()
@@ -1352,8 +1358,8 @@ class MainWindow(QMainWindow):
         # 加载门店筛选配置
         self.only_open_shops_checkbox.setChecked(getattr(self.config, 'only_open_shops', False))
         
-        # 加载重试超时配置
-        self.retry_timeout_spinbox.setValue(getattr(self.config, 'retry_timeout_minutes', 10))
+        # 加载重试超时配置（默认30分钟）
+        self.retry_timeout_spinbox.setValue(getattr(self.config, 'retry_timeout_minutes', 30))
         
         # 加载上一次的门店列表路径
         if self.config.shop_list_file:
@@ -1445,7 +1451,7 @@ class MainWindow(QMainWindow):
             enable_parallel=getattr(self.config, 'enable_parallel', True),
             parallel_workers=getattr(self.config, 'parallel_workers', 20),
             only_open_shops=getattr(self.config, 'only_open_shops', False),
-            retry_timeout_minutes=getattr(self.config, 'retry_timeout_minutes', 10),
+            retry_timeout_minutes=getattr(self.config, 'retry_timeout_minutes', 30),
         )
         
         self.worker.log_signal.connect(self.log)
