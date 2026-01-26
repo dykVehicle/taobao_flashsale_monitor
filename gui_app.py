@@ -67,13 +67,16 @@ class MonitorWorker(QThread):
     shop_result_signal = pyqtSignal(dict)  # 单个门店结果信号
     
     def __init__(self, config: AppConfig, profile_dir: str, auto_fill_login: bool = False, 
-                 shops: List[ShopInfo] = None, check_interval: int = 30):
+                 shops: List[ShopInfo] = None, check_interval: int = 30,
+                 enable_parallel: bool = True, parallel_workers: int = 20):
         super().__init__()
         self.config = config
         self.profile_dir = profile_dir
         self.auto_fill_login = auto_fill_login
         self.shops = shops or []  # 门店列表
         self.check_interval = check_interval  # 监控间隔（分钟）
+        self.enable_parallel = enable_parallel  # 是否启用并行监控
+        self.parallel_workers = parallel_workers  # 并行worker数量
         self.running = True
         self.fetcher = None
         self._is_cleaning_up = False
@@ -225,19 +228,9 @@ class MonitorWorker(QThread):
                 self._cleanup()
     
     def _run_multi_shop_monitor(self, log_callback):
-        """多门店监控"""
+        """多门店监控 - 支持串行和并行两种模式"""
         total_shops = len(self.shops)
         monitor_start_time = time.time()  # 记录总开始时间
-        
-        all_results = {
-            'shops_monitored': 0,
-            'shops_skipped': 0,
-            'total_off_sale': 0,
-            'total_sold_out': 0,
-            'shop_results': [],
-            'skipped_shops': [],  # 记录跳过的门店详情
-            'total_duration': 0,  # 总耗时
-        }
         
         # 等待用户登录
         self.log("检查登录状态...")
@@ -259,22 +252,128 @@ class MonitorWorker(QThread):
         
         self.log("✓ 登录状态正常")
         
-        # 设置日志回调，让 switch_shop 的日志能正确输出
+        # 设置日志回调
         self.fetcher._log_callback = log_callback
         
-        # 先导航到商品管理页面，确保页面上有门店切换器
+        # 先导航到商品管理页面
         self.log("导航到商品管理页面...")
         try:
             goods_url = f"{self.fetcher.base_url}/app/shop/{self.fetcher.shop_id}/food#app.shop.food?path=management"
             self.fetcher.driver.get(goods_url)
-            time.sleep(5)  # 等待页面加载
+            time.sleep(5)
             self.log("✓ 已进入商品管理页面")
         except Exception as e:
             self.log(f"⚠ 导航失败: {e}")
         
+        # 根据配置选择串行或并行模式
+        if self.enable_parallel and self.parallel_workers > 1 and total_shops > 1:
+            # 并行模式
+            all_results = self._run_parallel_monitor(log_callback)
+        else:
+            # 串行模式（原有逻辑）
+            all_results = self._run_serial_monitor(log_callback)
+        
+        # 完成处理
+        if self.running and all_results:
+            total_duration = time.time() - monitor_start_time
+            all_results['total_duration'] = total_duration
+            
+            # 格式化总耗时
+            if total_duration >= 60:
+                duration_str = f"{int(total_duration // 60)}分{int(total_duration % 60)}秒"
+            else:
+                duration_str = f"{total_duration:.1f}秒"
+            
+            self.log(f"")
+            self.log(f"{'='*50}")
+            self.log(f"📊 多门店监控完成！")
+            self.log(f"  ⏱ 总耗时: {duration_str}")
+            self.log(f"  ✓ 监控成功: {all_results['shops_monitored']} 个门店")
+            self.log(f"  ⏸ 跳过: {all_results['shops_skipped']} 个门店")
+            self.log(f"  🔻 总计下架: {all_results['total_off_sale']} 个商品")
+            self.log(f"  🔴 总计售罄: {all_results['total_sold_out']} 个商品")
+            
+            # 显示成功监控的门店
+            if all_results['shop_results']:
+                self.log(f"")
+                self.log(f"✅ 成功监控的门店:")
+                for sr in all_results['shop_results']:
+                    short_name = sr.get('short_name', simplify_shop_name(sr.get('shop_name', '')))
+                    off_count = len(sr.get('off_sale', []))
+                    sold_count = len(sr.get('sold_out', []))
+                    shop_dur = sr.get('duration', 0)
+                    self.log(f"   • {short_name}: 下架{off_count}/售罄{sold_count} ({shop_dur:.1f}秒)")
+            
+            # 显示跳过的门店详情
+            if all_results['skipped_shops']:
+                self.log(f"")
+                self.log(f"⏸ 跳过的门店列表:")
+                for skip in all_results['skipped_shops']:
+                    short_name = skip.get('short_name', simplify_shop_name(skip['name']))
+                    skip_dur = skip.get('duration', 0)
+                    self.log(f"   • {short_name} [{skip['status']}] - {skip['reason']} ({skip_dur:.1f}秒)")
+            
+            self.log(f"{'='*50}")
+            
+            self.progress_signal.emit(100)
+            self.status_signal.emit("完成")
+            
+            # 发送完成信号
+            self.finished_signal.emit({
+                'off_sale': [],
+                'sold_out': [],
+                'total': 0,
+                'multi_shop': True,
+                'all_results': all_results
+            })
+    
+    def _run_parallel_monitor(self, log_callback):
+        """并行监控模式"""
+        from parallel_monitor import ParallelMonitor
+        
+        self.log(f"")
+        self.log(f"🚀 使用并行监控模式 (Workers: {self.parallel_workers})")
+        
+        # 创建并行监控器
+        parallel_monitor = ParallelMonitor(
+            num_workers=self.parallel_workers,
+            base_debug_port=self.config.debug_port,
+            config=self.config,
+            profile_dir=self.profile_dir,
+            log_callback=log_callback,
+        )
+        
+        # 定义发送通知的回调
+        def send_notification(shop, off_sale, sold_out, shop_status):
+            if shop.webhook and (off_sale or sold_out):
+                self._send_shop_notification(shop, off_sale, sold_out, shop_status)
+        
+        # 运行并行监控
+        all_results = parallel_monitor.run_parallel_monitor(
+            shops=self.shops,
+            main_fetcher=self.fetcher,  # 主浏览器已登录
+            send_notification_callback=send_notification,
+        )
+        
+        return all_results
+    
+    def _run_serial_monitor(self, log_callback):
+        """串行监控模式（原有逻辑）"""
+        total_shops = len(self.shops)
+        
+        all_results = {
+            'shops_monitored': 0,
+            'shops_skipped': 0,
+            'total_off_sale': 0,
+            'total_sold_out': 0,
+            'shop_results': [],
+            'skipped_shops': [],
+            'total_duration': 0,
+        }
+        
         self.log(f"")
         self.log(f"{'='*50}")
-        self.log(f"开始多门店监控，共 {total_shops} 个门店")
+        self.log(f"开始多门店监控（串行模式），共 {total_shops} 个门店")
         self.log(f"{'='*50}")
         
         for idx, shop in enumerate(self.shops):
@@ -282,20 +381,19 @@ class MonitorWorker(QThread):
                 break
             
             progress = 30 + int((idx / total_shops) * 60)
-            # 简化店名
             short_name = simplify_shop_name(shop.name)
             
             self.progress_signal.emit(progress)
             self.status_signal.emit(f"监控中: {short_name} ({idx+1}/{total_shops})")
             
-            shop_start_time = time.time()  # 记录单店开始时间
+            shop_start_time = time.time()
             
             self.log(f"")
             self.log(f"┌{'─'*48}┐")
             self.log(f"│ [{idx+1}/{total_shops}] 正在监控: {short_name}")
             self.log(f"└{'─'*48}┘")
             
-            # 切换门店（使用完整名称搜索）
+            # 切换门店
             self.log(f"   🔄 开始切换到门店: {short_name}")
             switch_result = self.fetcher.switch_shop(shop.name)
             
@@ -326,20 +424,16 @@ class MonitorWorker(QThread):
             actual_shop_name = switch_result.get('shop_name', shop.name)
             self.log(f"   ✓ 门店切换成功: {actual_shop_name}")
             
-            # 获取营业状态
-            shop_status = "营业中"  # 能走到这里的都是营业中
-            
-            # 等待页面加载
+            shop_status = "营业中"
             time.sleep(3)
             
-            # 抓取商品数据（跳过导航，使用已切换的门店）
             try:
                 goods_list = self.fetcher.login_and_fetch(
                     auto_login=False,
                     wait_for_login=False,
                     login_timeout=60,
                     log_callback=log_callback,
-                    skip_navigation=True,  # 多门店模式：不要重新导航，使用当前门店
+                    skip_navigation=True,
                 )
                 
                 off_sale = [g for g in goods_list if g.status == "OFF_SALE"]
@@ -349,14 +443,14 @@ class MonitorWorker(QThread):
                 
                 shop_result = {
                     'shop': shop,
-                    'shop_name': actual_shop_name,  # 保存实际门店名称
-                    'short_name': short_name,  # 保存简化名称
-                    'shop_status': shop_status,  # 保存营业状态
+                    'shop_name': actual_shop_name,
+                    'short_name': short_name,
+                    'shop_status': shop_status,
                     'off_sale': off_sale,
                     'sold_out': sold_out,
                     'total': len(goods_list),
                     'success': True,
-                    'duration': shop_duration  # 单店耗时
+                    'duration': shop_duration
                 }
                 
                 all_results['shops_monitored'] += 1
@@ -366,70 +460,16 @@ class MonitorWorker(QThread):
                 
                 self.log(f"   ✓ 抓取完成: 下架 {len(off_sale)} 个, 售罄 {len(sold_out)} 个 (耗时 {shop_duration:.1f}秒)")
                 
-                # 发送单店通知（包含营业状态）
                 if (len(off_sale) > 0 or len(sold_out) > 0) and shop.webhook:
                     self._send_shop_notification(shop, off_sale, sold_out, shop_status)
                 
-                # 发送单店结果信号
                 self.shop_result_signal.emit(shop_result)
                 
             except Exception as e:
                 self.log(f"   ✗ 抓取失败: {e}")
                 all_results['shops_skipped'] += 1
         
-        # 完成
-        if self.running:
-            total_duration = time.time() - monitor_start_time
-            all_results['total_duration'] = total_duration
-            
-            # 格式化总耗时
-            if total_duration >= 60:
-                duration_str = f"{int(total_duration // 60)}分{int(total_duration % 60)}秒"
-            else:
-                duration_str = f"{total_duration:.1f}秒"
-            
-            self.log(f"")
-            self.log(f"{'='*50}")
-            self.log(f"📊 多门店监控完成！")
-            self.log(f"  ⏱ 总耗时: {duration_str}")
-            self.log(f"  ✓ 监控成功: {all_results['shops_monitored']} 个门店")
-            self.log(f"  ⏸ 跳过: {all_results['shops_skipped']} 个门店")
-            self.log(f"  🔻 总计下架: {all_results['total_off_sale']} 个商品")
-            self.log(f"  🔴 总计售罄: {all_results['total_sold_out']} 个商品")
-            
-            # 显示成功监控的门店（带耗时）
-            if all_results['shop_results']:
-                self.log(f"")
-                self.log(f"✅ 成功监控的门店:")
-                for sr in all_results['shop_results']:
-                    short_name = sr.get('short_name', simplify_shop_name(sr.get('shop_name', '')))
-                    off_count = len(sr.get('off_sale', []))
-                    sold_count = len(sr.get('sold_out', []))
-                    shop_dur = sr.get('duration', 0)
-                    self.log(f"   • {short_name}: 下架{off_count}/售罄{sold_count} ({shop_dur:.1f}秒)")
-            
-            # 显示跳过的门店详情（带耗时）
-            if all_results['skipped_shops']:
-                self.log(f"")
-                self.log(f"⏸ 跳过的门店列表:")
-                for skip in all_results['skipped_shops']:
-                    short_name = skip.get('short_name', simplify_shop_name(skip['name']))
-                    skip_dur = skip.get('duration', 0)
-                    self.log(f"   • {short_name} [{skip['status']}] - {skip['reason']} ({skip_dur:.1f}秒)")
-            
-            self.log(f"{'='*50}")
-            
-            self.progress_signal.emit(100)
-            self.status_signal.emit("完成")
-            
-            # 发送完成信号（包含 default_webhook 用于发送总结）
-            self.finished_signal.emit({
-                'off_sale': [],
-                'sold_out': [],
-                'total': 0,
-                'multi_shop': True,
-                'all_results': all_results
-            })
+        return all_results
     
     def _run_single_shop_monitor(self, log_callback):
         """单店铺监控（兼容旧逻辑）"""
@@ -1029,6 +1069,22 @@ class MainWindow(QMainWindow):
         self.interval_spin.setSuffix(" 分钟")
         monitor_form.addRow("检查间隔:", self.interval_spin)
         
+        # 并行监控设置
+        parallel_layout = QHBoxLayout()
+        self.parallel_checkbox = QCheckBox("启用并行监控")
+        self.parallel_checkbox.setChecked(True)
+        self.parallel_checkbox.setToolTip("同时使用多个浏览器实例监控不同门店，大幅提升监控速度")
+        parallel_layout.addWidget(self.parallel_checkbox)
+        
+        self.parallel_workers_spin = QSpinBox()
+        self.parallel_workers_spin.setRange(1, 50)
+        self.parallel_workers_spin.setValue(20)
+        self.parallel_workers_spin.setSuffix(" 个Worker")
+        self.parallel_workers_spin.setToolTip("并行浏览器实例数量，每个Worker监控不同的门店")
+        parallel_layout.addWidget(self.parallel_workers_spin)
+        parallel_layout.addStretch()
+        monitor_form.addRow("并行监控:", parallel_layout)
+        
         export_layout = QHBoxLayout()
         self.export_dir_input = QLineEdit()
         self.export_dir_input.setText("./exports")
@@ -1183,6 +1239,10 @@ class MainWindow(QMainWindow):
         self.interval_spin.setValue(self.config.check_interval)
         self.export_dir_input.setText(self.config.export_dir)
         
+        # 加载并行监控配置
+        self.parallel_checkbox.setChecked(getattr(self.config, 'enable_parallel', True))
+        self.parallel_workers_spin.setValue(getattr(self.config, 'parallel_workers', 20))
+        
         # 加载上一次的门店列表路径
         if self.config.shop_list_file:
             self.shop_file_input.setText(self.config.shop_list_file)
@@ -1208,6 +1268,10 @@ class MainWindow(QMainWindow):
         self.config.headless = self.headless_checkbox.isChecked()
         self.config.check_interval = self.interval_spin.value()
         self.config.export_dir = self.export_dir_input.text().strip()
+        
+        # 保存并行监控配置
+        self.config.enable_parallel = self.parallel_checkbox.isChecked()
+        self.config.parallel_workers = self.parallel_workers_spin.value()
     
     def save_config(self):
         """保存配置"""
@@ -1259,7 +1323,9 @@ class MainWindow(QMainWindow):
             profile_dir,
             auto_fill_login=self.config.auto_login,
             shops=shops,
-            check_interval=self.config.check_interval  # 监控间隔（分钟）
+            check_interval=self.config.check_interval,  # 监控间隔（分钟）
+            enable_parallel=getattr(self.config, 'enable_parallel', True),
+            parallel_workers=getattr(self.config, 'parallel_workers', 20),
         )
         
         self.worker.log_signal.connect(self.log)

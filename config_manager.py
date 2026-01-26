@@ -69,6 +69,10 @@ class AppConfig:
     shop_list_file: str = "doc/门店列表_v2.xlsx"  # 当前门店列表文件
     shop_list_last_update: str = ""  # 上一次更新时间
     shop_list_history: str = ""  # 历史记录（JSON格式）
+    
+    # 并行监控配置
+    parallel_workers: int = 20  # 并行worker数量，默认20个
+    enable_parallel: bool = True  # 是否启用并行监控
 
 
 class ConfigManager:
