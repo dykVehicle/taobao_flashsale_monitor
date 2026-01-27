@@ -201,7 +201,7 @@ class PlaywrightMonitor:
                 pass
     
     def _simplify_shop_name(self, full_name: str) -> str:
-        """简化门店名称"""
+        """简化门店名称（用于显示）"""
         import re
         if not full_name:
             return "未知"
@@ -217,6 +217,30 @@ class PlaywrightMonitor:
         name = name.strip()
         
         return name if name else full_name
+    
+    def _get_search_keyword(self, full_name: str) -> str:
+        """
+        生成门店搜索关键字（用于搜索，保留品牌区分信息）
+        
+        例如：
+        - 阿狗手打·手作(松江万达店) -> 手作(松江万达店)
+        - 阿狗手打·手作黑糖珍珠奶茶(松江万达店) -> 手作黑糖珍珠奶茶(松江万达店)
+        
+        这样可以区分同名但品牌不同的门店
+        """
+        import re
+        if not full_name:
+            return full_name
+        
+        # 只去掉 "阿狗手打·" 前缀，保留后面的品牌区分信息
+        name = full_name
+        short_prefixes = ['阿狗手打·', '阿狗']
+        for prefix in short_prefixes:
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+                break
+        
+        return name.strip() if name else full_name
     
     async def _get_current_shop_name(self, page, silent: bool = False) -> str:
         """
@@ -513,14 +537,16 @@ class PlaywrightMonitor:
                 return {'success': False, 'reason': '未找到搜索框'}
             
             # ========== 步骤2: 搜索门店 ==========
-            # 使用更短的关键字搜索，提高速度
-            search_keyword = short_name
+            # 使用保留品牌信息的关键字搜索，避免同名门店搜索错误
+            # 例如: "手作(松江万达店)" 或 "手作黑糖珍珠奶茶(松江万达店)"
+            search_keyword = self._get_search_keyword(shop_name)
             
             # 清空并输入搜索关键字
             await search_input.fill('')
             await search_input.fill(search_keyword)
             
             # 智能等待：等待搜索结果出现，最多2秒
+            # 使用简化名称匹配结果（因为下拉列表显示的是完整名称）
             result_selectors = [
                 f'.cook-cascader-dropdown li:has-text("{short_name}")',
                 f'li[class*="option"]:has-text("{short_name}")',
@@ -1944,14 +1970,9 @@ class PlaywrightMonitor:
                 retry_reasons = ['切换失败', '验证失败', '未找到门店', '页面异常', '超时']
                 retry_round = 0
                 retry_timeout_seconds = self.retry_timeout_minutes * 60
+                retry_start_time = None  # 重试阶段开始时间
                 
                 while self.running:
-                    # 检查是否超时
-                    elapsed = time.time() - monitor_start
-                    if elapsed >= retry_timeout_seconds:
-                        self.log(f"⏱ 总耗时已达 {self.retry_timeout_minutes} 分钟，停止重试")
-                        break
-                    
                     # 收集需要重试的门店（排除因门店状态跳过的）
                     retry_shops = []
                     for skip_info in all_results['skipped_shops']:
@@ -1968,8 +1989,22 @@ class PlaywrightMonitor:
                     if not retry_shops:
                         break  # 没有需要重试的门店
                     
+                    # 第一次进入重试时记录开始时间
+                    if retry_start_time is None:
+                        retry_start_time = time.time()
+                        first_round_duration = retry_start_time - monitor_start
+                        self.log(f"")
+                        self.log(f"📊 第一轮监控耗时: {int(first_round_duration//60)}分{int(first_round_duration%60)}秒")
+                        self.log(f"⏱ 重试超时设置: {self.retry_timeout_minutes} 分钟")
+                    
+                    # 检查重试是否超时（从重试开始计时）
+                    retry_elapsed = time.time() - retry_start_time
+                    if retry_elapsed >= retry_timeout_seconds:
+                        self.log(f"⏱ 重试耗时已达 {self.retry_timeout_minutes} 分钟，停止重试")
+                        break
+                    
                     retry_round += 1
-                    remaining_time = int(retry_timeout_seconds - elapsed)
+                    remaining_time = int(retry_timeout_seconds - retry_elapsed)
                     self.log(f"")
                     self.log(f"{'='*50}")
                     self.log(f"🔄 第 {retry_round} 轮重试：{len(retry_shops)} 个失败门店 (剩余 {remaining_time//60}分{remaining_time%60}秒)")
@@ -2006,8 +2041,8 @@ class PlaywrightMonitor:
                         if not self.running:
                             break
                         
-                        # 检查超时
-                        if time.time() - monitor_start >= retry_timeout_seconds:
+                        # 检查超时（从重试阶段开始计时）
+                        if retry_start_time and (time.time() - retry_start_time >= retry_timeout_seconds):
                             self.log(f"⏱ 重试超时，取消剩余任务")
                             # 将剩余门店标记为跳过
                             for remaining_shop in retry_shops[retry_batch_start:]:
