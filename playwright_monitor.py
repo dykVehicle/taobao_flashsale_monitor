@@ -220,19 +220,41 @@ class PlaywrightMonitor:
     
     def _get_search_keyword(self, full_name: str) -> str:
         """
-        生成门店搜索关键字（用于搜索，保留品牌区分信息）
+        生成门店搜索关键字（只用门店名部分，不含品牌）
         
         例如：
-        - 阿狗手打·手作(松江万达店) -> 手作(松江万达店)
-        - 阿狗手打·手作黑糖珍珠奶茶(松江万达店) -> 手作黑糖珍珠奶茶(松江万达店)
+        - 阿狗手打·手作(松江万达店) -> 松江万达店
+        - 阿狗手打·手作黑糖珍珠奶茶(松江万达店) -> 松江万达店
+        - 松江万达店 -> 松江万达店
         
-        这样可以区分同名但品牌不同的门店
+        搜索时用简短名称，选择结果时再匹配品牌
         """
         import re
         if not full_name:
             return full_name
         
-        # 只去掉 "阿狗手打·" 前缀，保留后面的品牌区分信息
+        # 提取括号内的门店名
+        match = re.search(r'[（(]([^）)]+)[）)]', full_name)
+        if match:
+            return match.group(1).strip()
+        
+        # 如果没有括号，返回简化后的名称
+        return self._simplify_shop_name(full_name)
+    
+    def _get_brand_keyword(self, full_name: str) -> str:
+        """
+        获取品牌关键字（用于在搜索结果中匹配正确的门店）
+        
+        例如：
+        - 阿狗手打·手作(松江万达店) -> 手作
+        - 阿狗手打·手作黑糖珍珠奶茶(松江万达店) -> 手作黑糖珍珠奶茶
+        - 松江万达店 -> ''
+        """
+        import re
+        if not full_name:
+            return ''
+        
+        # 去掉 "阿狗手打·" 前缀
         name = full_name
         short_prefixes = ['阿狗手打·', '阿狗']
         for prefix in short_prefixes:
@@ -240,7 +262,12 @@ class PlaywrightMonitor:
                 name = name[len(prefix):]
                 break
         
-        return name.strip() if name else full_name
+        # 提取括号前的品牌部分
+        match = re.search(r'^([^（(]+)[（(]', name)
+        if match:
+            return match.group(1).strip()
+        
+        return ''
     
     async def _get_current_shop_name(self, page, silent: bool = False) -> str:
         """
@@ -487,18 +514,18 @@ class PlaywrightMonitor:
             if not clicked:
                 return {'success': False, 'reason': '未找到门店下拉按钮(已尝试刷新)'}
             
-            # 智能等待：等待搜索框出现，最多1.5秒
-            search_selectors = [
-                'input[placeholder*="搜索店铺"]',
-                'input[placeholder*="搜索"]',
-                '.cook-cascader input',
+            # 智能等待：等待门店下拉菜单中的搜索框出现
+            # 注意：必须是下拉菜单中的搜索框，不是页面上的其他搜索框
+            dropdown_search_selectors = [
+                '.cook-cascader-dropdown input[placeholder*="搜索"]',
                 '.cook-cascader-dropdown input',
-                'input[class*="search"]',
+                '.shopSwitcher .cook-cascader-dropdown input',
+                '[class*="cascader-dropdown"] input',
             ]
             
             search_input = None
-            for _ in range(3):  # 最多等待1.5秒
-                for selector in search_selectors:
+            for _ in range(4):  # 最多等待2秒
+                for selector in dropdown_search_selectors:
                     try:
                         elem = page.locator(selector).first
                         if await elem.is_visible(timeout=500):
@@ -510,9 +537,13 @@ class PlaywrightMonitor:
                     break
                 await asyncio.sleep(0.5)
             
-            # 如果找不到搜索框，可能下拉框没展开，重新点击下拉按钮
+            # 如果找不到下拉菜单中的搜索框，可能下拉框没展开或页面状态异常
             if not search_input:
-                self.log(f"   ⚠ 未找到搜索框，重新点击下拉按钮...")
+                self.log(f"   ⚠ 门店下拉菜单未展开，重新点击...")
+                # 尝试先关闭可能存在的下拉框，再重新点击
+                await page.keyboard.press('Escape')
+                await asyncio.sleep(0.3)
+                
                 for selector in dropdown_selectors:
                     try:
                         elem = page.locator(selector).first
@@ -523,8 +554,8 @@ class PlaywrightMonitor:
                     except:
                         continue
                 
-                # 再次尝试查找搜索框
-                for selector in search_selectors:
+                # 再次尝试查找下拉菜单中的搜索框
+                for selector in dropdown_search_selectors:
                     try:
                         elem = page.locator(selector).first
                         if await elem.is_visible(timeout=1000):
@@ -533,20 +564,28 @@ class PlaywrightMonitor:
                     except:
                         continue
             
+            # 如果仍然找不到，说明页面状态异常，需要刷新
             if not search_input:
-                return {'success': False, 'reason': '未找到搜索框'}
+                self.log(f"   ⚠ 门店下拉菜单异常，刷新页面...")
+                try:
+                    await page.reload(wait_until='load', timeout=30000)
+                    await asyncio.sleep(2)
+                    await self._close_popup_dialogs(page)
+                except:
+                    pass
+                return {'success': False, 'reason': '门店下拉菜单未展开(已刷新页面)'}
             
             # ========== 步骤2: 搜索门店 ==========
-            # 使用保留品牌信息的关键字搜索，避免同名门店搜索错误
-            # 例如: "手作(松江万达店)" 或 "手作黑糖珍珠奶茶(松江万达店)"
+            # 使用简短的门店名搜索（如"松江万达店"），不包含品牌
             search_keyword = self._get_search_keyword(shop_name)
+            # 获取品牌关键字，用于在多个结果中选择正确的门店
+            brand_keyword = self._get_brand_keyword(shop_name)
             
             # 清空并输入搜索关键字
             await search_input.fill('')
             await search_input.fill(search_keyword)
             
             # 智能等待：等待搜索结果出现，最多2秒
-            # 使用简化名称匹配结果（因为下拉列表显示的是完整名称）
             result_selectors = [
                 f'.cook-cascader-dropdown li:has-text("{short_name}")',
                 f'li[class*="option"]:has-text("{short_name}")',
@@ -557,22 +596,42 @@ class PlaywrightMonitor:
             
             shop_status = '营业中'
             result_elem = None
+            all_results = []
             
             for _ in range(4):  # 最多等待2秒
                 for selector in result_selectors:
                     try:
-                        elem = page.locator(selector).first
-                        if await elem.is_visible(timeout=500):
-                            result_elem = elem
+                        elems = page.locator(selector)
+                        count = await elems.count()
+                        if count > 0:
+                            for i in range(count):
+                                elem = elems.nth(i)
+                                if await elem.is_visible(timeout=300):
+                                    all_results.append(elem)
                             break
                     except:
                         continue
-                if result_elem:
+                if all_results:
                     break
                 await asyncio.sleep(0.5)
             
-            # ========== 步骤3: 点击搜索结果 ==========
-            if result_elem:
+            # ========== 步骤3: 选择并点击正确的搜索结果 ==========
+            if all_results:
+                # 如果有品牌关键字且有多个结果，选择匹配品牌的那个
+                if brand_keyword and len(all_results) > 1:
+                    for elem in all_results:
+                        try:
+                            elem_text = await elem.inner_text()
+                            if brand_keyword in elem_text:
+                                result_elem = elem
+                                break
+                        except:
+                            continue
+                
+                # 如果没找到匹配品牌的，使用第一个结果
+                if not result_elem:
+                    result_elem = all_results[0]
+                
                 try:
                     # 检查门店状态
                     elem_text = await result_elem.inner_text()
