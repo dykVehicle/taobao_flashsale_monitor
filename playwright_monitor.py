@@ -179,6 +179,7 @@ class PlaywrightMonitor:
         log_callback: Callable = None,
         only_open_shops: bool = False,
         retry_timeout_minutes: int = 10,  # 重试超时时间（分钟）
+        shop_manager = None,  # 门店管理器（用于商品白名单过滤）
     ):
         self.num_workers = num_workers
         self.parallel_workers = num_workers  # 兼容两种命名
@@ -186,9 +187,11 @@ class PlaywrightMonitor:
         self.log_callback = log_callback
         self.only_open_shops = only_open_shops  # 只监控营业中的门店
         self.retry_timeout_minutes = retry_timeout_minutes  # 重试超时时间
+        self.shop_manager = shop_manager  # 门店管理器（用于过滤无效商品）
         self.browser = None
         self.context = None
         self.running = True
+        self._cdp_connected = False  # 是否通过CDP连接到现有浏览器
         self._shop_switch_lock = None  # 门店切换锁（在异步环境中初始化）
         
     def log(self, msg: str):
@@ -514,18 +517,20 @@ class PlaywrightMonitor:
             if not clicked:
                 return {'success': False, 'reason': '未找到门店下拉按钮(已尝试刷新)'}
             
-            # 智能等待：等待门店下拉菜单中的搜索框出现
-            # 注意：必须是下拉菜单中的搜索框，不是页面上的其他搜索框
-            dropdown_search_selectors = [
-                '.cook-cascader-dropdown input[placeholder*="搜索"]',
-                '.cook-cascader-dropdown input',
-                '.shopSwitcher .cook-cascader-dropdown input',
-                '[class*="cascader-dropdown"] input',
+            # 智能等待：等待搜索框出现，最多1.5秒
+            # 优先使用下拉菜单内的选择器，但也保留通用选择器作为兜底
+            search_selectors = [
+                'input[placeholder*="搜索店铺"]',       # 最精确的选择器
+                '.cook-cascader-dropdown input',         # 下拉菜单内的搜索框
+                '.cook-cascader input',                  # cascader组件内的搜索框
+                'input[placeholder*="搜索"]',           # 通用搜索框选择器
+                '[class*="cascader-dropdown"] input',    # 兼容其他类名
+                'input[class*="search"]',               # 搜索类输入框
             ]
             
             search_input = None
-            for _ in range(4):  # 最多等待2秒
-                for selector in dropdown_search_selectors:
+            for _ in range(3):  # 最多等待1.5秒
+                for selector in search_selectors:
                     try:
                         elem = page.locator(selector).first
                         if await elem.is_visible(timeout=500):
@@ -537,9 +542,9 @@ class PlaywrightMonitor:
                     break
                 await asyncio.sleep(0.5)
             
-            # 如果找不到下拉菜单中的搜索框，可能下拉框没展开或页面状态异常
+            # 如果找不到搜索框，可能下拉框没展开，重新点击下拉按钮
             if not search_input:
-                self.log(f"   ⚠ 门店下拉菜单未展开，重新点击...")
+                self.log(f"   ⚠ 未找到搜索框，重新点击下拉按钮...")
                 # 尝试先关闭可能存在的下拉框，再重新点击
                 await page.keyboard.press('Escape')
                 await asyncio.sleep(0.3)
@@ -554,8 +559,8 @@ class PlaywrightMonitor:
                     except:
                         continue
                 
-                # 再次尝试查找下拉菜单中的搜索框
-                for selector in dropdown_search_selectors:
+                # 再次尝试查找搜索框
+                for selector in search_selectors:
                     try:
                         elem = page.locator(selector).first
                         if await elem.is_visible(timeout=1000):
@@ -566,14 +571,14 @@ class PlaywrightMonitor:
             
             # 如果仍然找不到，说明页面状态异常，需要刷新
             if not search_input:
-                self.log(f"   ⚠ 门店下拉菜单异常，刷新页面...")
+                self.log(f"   ⚠ 搜索框不可见，刷新页面...")
                 try:
                     await page.reload(wait_until='load', timeout=30000)
                     await asyncio.sleep(2)
                     await self._close_popup_dialogs(page)
                 except:
                     pass
-                return {'success': False, 'reason': '门店下拉菜单未展开(已刷新页面)'}
+                return {'success': False, 'reason': '未找到搜索框(已刷新页面)'}
             
             # ========== 步骤2: 搜索门店 ==========
             # 使用简短的门店名搜索（如"松江万达店"），不包含品牌
@@ -1466,13 +1471,33 @@ class PlaywrightMonitor:
             self.log(f"[P{page_id}] 📦 开始抓取: {short_name}")
             off_sale, sold_out = await self._fetch_goods(page)
             
-            duration = time.time() - shop_start
-            self.log(f"[P{page_id}] ✓ {short_name}: 下架{len(off_sale)} 售罄{len(sold_out)} ({duration:.1f}秒)")
+            # 商品白名单过滤：只通知在"导出商品"表中的有效商品
+            notify_off_sale = off_sale
+            notify_sold_out = sold_out
+            filtered_off = 0
+            filtered_sold = 0
             
-            # 发送通知
-            if send_notification_callback and (off_sale or sold_out):
+            if self.shop_manager and self.shop_manager.valid_goods_names:
+                valid_off_sale, invalid_off_sale = self.shop_manager.filter_valid_goods(off_sale)
+                valid_sold_out, invalid_sold_out = self.shop_manager.filter_valid_goods(sold_out)
+                
+                notify_off_sale = valid_off_sale
+                notify_sold_out = valid_sold_out
+                filtered_off = len(invalid_off_sale)
+                filtered_sold = len(invalid_sold_out)
+            
+            duration = time.time() - shop_start
+            
+            # 日志显示：实际数量 + 过滤数量
+            filter_info = ""
+            if filtered_off > 0 or filtered_sold > 0:
+                filter_info = f" (已过滤: 下架{filtered_off} 售罄{filtered_sold})"
+            self.log(f"[P{page_id}] ✓ {short_name}: 下架{len(notify_off_sale)} 售罄{len(notify_sold_out)}{filter_info} ({duration:.1f}秒)")
+            
+            # 发送通知（只通知有效商品）
+            if send_notification_callback and (notify_off_sale or notify_sold_out):
                 try:
-                    send_notification_callback(shop, off_sale, sold_out, shop_status, duration)
+                    send_notification_callback(shop, notify_off_sale, notify_sold_out, shop_status, duration)
                 except Exception as e:
                     self.log(f"[P{page_id}] 通知发送失败: {e}")
             
@@ -1480,8 +1505,8 @@ class PlaywrightMonitor:
                 shop_name=shop.name,
                 short_name=short_name,
                 success=True,
-                off_sale=off_sale,
-                sold_out=sold_out,
+                off_sale=notify_off_sale,  # 返回过滤后的有效商品
+                sold_out=notify_sold_out,  # 返回过滤后的有效商品
                 duration=duration,
                 shop_status=shop_status,
             )
@@ -1845,8 +1870,8 @@ class PlaywrightMonitor:
         
         try:
             async with async_playwright() as p:
-                # 启动浏览器
-                self.log(f"   正在启动浏览器...")
+                # 启动独立的Playwright Chromium浏览器（使用持久化profile保存登录状态）
+                self.log(f"   正在启动Chromium浏览器...")
                 
                 # 获取持久化目录
                 persistent_dir = self._get_persistent_dir()
@@ -1859,8 +1884,8 @@ class PlaywrightMonitor:
                     args=['--disable-blink-features=AutomationControlled'],
                     viewport={'width': 1280, 'height': 800},
                 )
-                
-                self.log(f"   ✓ 浏览器启动成功")
+                self._cdp_connected = False
+                self.log(f"   ✓ Chromium浏览器启动成功")
                 
                 # 获取或创建第一个页面用于登录
                 pages = self.context.pages
@@ -2278,7 +2303,8 @@ class PlaywrightMonitor:
         self.running = False
         
         # 只有在需要关闭浏览器时才执行关闭操作
-        if close_browser and self.context:
+        # 注意：如果是通过CDP连接到Selenium的浏览器，不要关闭（那是Selenium的）
+        if close_browser and self.context and not self._cdp_connected:
             try:
                 # 使用asyncio关闭
                 import asyncio
@@ -2293,3 +2319,9 @@ class PlaywrightMonitor:
             except:
                 pass
             self.context = None
+        
+        # 如果是CDP连接，只断开连接，不关闭浏览器
+        if self._cdp_connected:
+            self.context = None
+            self.browser = None
+            self._cdp_connected = False

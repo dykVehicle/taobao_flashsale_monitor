@@ -55,6 +55,22 @@ except ImportError:
     def get_version(): return "2.0"
 
 
+class ShopLoadWorker(QThread):
+    """门店列表加载线程（后台加载，避免UI卡死）"""
+    finished_signal = pyqtSignal(bool, object)  # (success, shop_manager or error_msg)
+    
+    def __init__(self, shop_file: str, shop_manager: ShopManager):
+        super().__init__()
+        self.shop_file = shop_file
+        self.shop_manager = shop_manager
+    
+    def run(self):
+        try:
+            success = self.shop_manager.load(self.shop_file)
+            self.finished_signal.emit(success, self.shop_manager if success else "加载失败")
+        except Exception as e:
+            self.finished_signal.emit(False, str(e))
+
 
 class MonitorWorker(QThread):
     """监控工作线程 - 支持多门店监控"""
@@ -69,7 +85,8 @@ class MonitorWorker(QThread):
     def __init__(self, config: AppConfig, profile_dir: str, auto_fill_login: bool = False, 
                  shops: List[ShopInfo] = None, check_interval: int = 30,
                  enable_parallel: bool = True, parallel_workers: int = 20,
-                 only_open_shops: bool = False, retry_timeout_minutes: int = 30):
+                 only_open_shops: bool = False, retry_timeout_minutes: int = 30,
+                 shop_manager = None):
         super().__init__()
         self.config = config
         self.profile_dir = profile_dir
@@ -80,6 +97,7 @@ class MonitorWorker(QThread):
         self.enable_parallel = enable_parallel  # 是否启用并行监控
         self.parallel_workers = parallel_workers  # 并行worker数量
         self.only_open_shops = only_open_shops  # 只监控营业中的门店
+        self.shop_manager = shop_manager  # 门店管理器（用于商品白名单过滤）
         self.running = True
         self.fetcher = None
         self.pw_monitor = None  # Playwright监控器
@@ -352,6 +370,7 @@ class MonitorWorker(QThread):
                 log_callback=log_callback,
                 only_open_shops=self.only_open_shops,
                 retry_timeout_minutes=self.retry_timeout_minutes,
+                shop_manager=self.shop_manager,  # 传递门店管理器（用于商品白名单过滤）
             )
             
             # 定义发送通知的回调（包含耗时参数）
@@ -1452,6 +1471,7 @@ class MainWindow(QMainWindow):
             parallel_workers=getattr(self.config, 'parallel_workers', 20),
             only_open_shops=getattr(self.config, 'only_open_shops', False),
             retry_timeout_minutes=getattr(self.config, 'retry_timeout_minutes', 30),
+            shop_manager=self.shop_manager,  # 传递门店管理器（用于商品白名单过滤）
         )
         
         self.worker.log_signal.connect(self.log)
@@ -1765,7 +1785,7 @@ class MainWindow(QMainWindow):
     
     def _load_shop_list(self, silent: bool = False):
         """
-        加载门店列表
+        加载门店列表（异步加载，避免UI卡死）
         
         Args:
             silent: 是否静默模式（不输出日志）
@@ -1796,7 +1816,25 @@ class MainWindow(QMainWindow):
                 self.shop_file_input.setPlaceholderText("请选择门店列表文件 (Excel)")
             return
         
-        if self.shop_manager.load(shop_file):
+        # 显示加载中状态
+        self.shop_count_label.setText("正在加载...")
+        self.shop_list_text.setText("加载门店列表中，请稍候...")
+        
+        # 保存silent参数供回调使用
+        self._load_silent = silent
+        self._load_shop_file = shop_file
+        
+        # 使用后台线程加载（避免UI卡死）
+        self._shop_load_worker = ShopLoadWorker(shop_file, self.shop_manager)
+        self._shop_load_worker.finished_signal.connect(self._on_shop_list_loaded)
+        self._shop_load_worker.start()
+    
+    def _on_shop_list_loaded(self, success: bool, result):
+        """门店列表加载完成回调"""
+        silent = getattr(self, '_load_silent', False)
+        shop_file = getattr(self, '_load_shop_file', '')
+        
+        if success:
             shops = self.shop_manager.shops
             self.shop_count_label.setText(f"已加载: {len(shops)} 个门店")
             
@@ -1816,6 +1854,11 @@ class MainWindow(QMainWindow):
                 for shop in shops:
                     short_name = simplify_shop_name(shop.name)
                     self.log(f"   • {short_name}")
+                
+                # 显示商品白名单信息
+                whitelist_count = self.shop_manager.get_whitelist_count()
+                if whitelist_count > 0:
+                    self.log(f"✓ 已加载 {whitelist_count} 个商品白名单（仅通知白名单中的商品）")
             
             # 记录门店列表更新
             from datetime import datetime
@@ -1851,7 +1894,8 @@ class MainWindow(QMainWindow):
             self.shop_count_label.setText("加载失败，请检查文件格式")
             self.shop_list_text.clear()
             if not silent:
-                self.log(f"⚠ 门店列表加载失败，请检查文件格式: {os.path.basename(shop_file)}")
+                error_msg = result if isinstance(result, str) else "未知错误"
+                self.log(f"⚠ 门店列表加载失败: {error_msg}")
     
     def select_shop_file(self):
         """选择门店列表文件"""
