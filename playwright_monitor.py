@@ -496,15 +496,26 @@ class PlaywrightMonitor:
             if not clicked:
                 self.log(f"   ⚠ 未找到门店下拉按钮，刷新页面重试...")
                 try:
-                    await page.reload(wait_until='load', timeout=30000)
-                    await asyncio.sleep(2)
+                    # 增加超时时间到90秒（网络慢时需要更长时间）
+                    # 先尝试普通刷新
+                    try:
+                        await page.reload(wait_until='load', timeout=90000)
+                    except Exception as reload_err:
+                        # 如果刷新超时，尝试重新导航到页面
+                        self.log(f"   ⚠ 页面刷新超时，尝试重新导航...")
+                        base_url = self.config.base_url if self.config else "https://melody.shop.ele.me"
+                        shop_id = self.config.shop_id if self.config else ""
+                        goods_url = f"{base_url}/app/shop/{shop_id}/food#app.shop.food?path=management"
+                        await page.goto(goods_url, wait_until='load', timeout=90000)
+                    
+                    await asyncio.sleep(3)  # 等待页面JS渲染
                     await self._close_popup_dialogs(page)
                     
                     # 刷新后再次尝试点击下拉按钮
                     for selector in dropdown_selectors:
                         try:
                             elem = page.locator(selector).first
-                            if await elem.is_visible(timeout=2000):
+                            if await elem.is_visible(timeout=3000):
                                 await elem.click()
                                 clicked = True
                                 self.log(f"   ✓ 刷新后找到下拉按钮")
@@ -573,8 +584,17 @@ class PlaywrightMonitor:
             if not search_input:
                 self.log(f"   ⚠ 搜索框不可见，刷新页面...")
                 try:
-                    await page.reload(wait_until='load', timeout=30000)
-                    await asyncio.sleep(2)
+                    # 增加超时时间到90秒
+                    try:
+                        await page.reload(wait_until='load', timeout=90000)
+                    except Exception as reload_err:
+                        # 如果刷新超时，尝试重新导航
+                        self.log(f"   ⚠ 刷新超时，尝试重新导航...")
+                        base_url = self.config.base_url if self.config else "https://melody.shop.ele.me"
+                        shop_id = self.config.shop_id if self.config else ""
+                        goods_url = f"{base_url}/app/shop/{shop_id}/food#app.shop.food?path=management"
+                        await page.goto(goods_url, wait_until='load', timeout=90000)
+                    await asyncio.sleep(3)
                     await self._close_popup_dialogs(page)
                 except:
                     pass
@@ -624,14 +644,30 @@ class PlaywrightMonitor:
             if all_results:
                 # 如果有品牌关键字且有多个结果，选择匹配品牌的那个
                 if brand_keyword and len(all_results) > 1:
+                    # 收集所有结果的文本和对应的品牌关键字
+                    result_texts = []
                     for elem in all_results:
                         try:
                             elem_text = await elem.inner_text()
-                            if brand_keyword in elem_text:
-                                result_elem = elem
-                                break
+                            elem_brand = self._get_brand_keyword(elem_text)
+                            result_texts.append((elem, elem_text, elem_brand))
                         except:
                             continue
+                    
+                    # 优先级1: 精确匹配品牌关键字（如"手作"只匹配"手作"，不匹配"手作黑糖珍珠奶茶"）
+                    for elem, elem_text, elem_brand in result_texts:
+                        if elem_brand == brand_keyword:
+                            result_elem = elem
+                            logger.info(f"精确匹配门店品牌: {brand_keyword} -> {elem_text[:40]}")
+                            break
+                    
+                    # 优先级2: 如果没有精确匹配，检查是否有包含匹配
+                    if not result_elem:
+                        for elem, elem_text, elem_brand in result_texts:
+                            if brand_keyword in elem_text:
+                                result_elem = elem
+                                logger.info(f"包含匹配门店品牌: {brand_keyword} -> {elem_text[:40]}")
+                                break
                 
                 # 如果没找到匹配品牌的，使用第一个结果
                 if not result_elem:
@@ -1494,8 +1530,8 @@ class PlaywrightMonitor:
                 filter_info = f" (已过滤: 下架{filtered_off} 售罄{filtered_sold})"
             self.log(f"[P{page_id}] ✓ {short_name}: 下架{len(notify_off_sale)} 售罄{len(notify_sold_out)}{filter_info} ({duration:.1f}秒)")
             
-            # 发送通知（只通知有效商品）
-            if send_notification_callback and (notify_off_sale or notify_sold_out):
+            # 发送通知（始终发送，包括0商品时的正常状态通知）
+            if send_notification_callback:
                 try:
                     send_notification_callback(shop, notify_off_sale, notify_sold_out, shop_status, duration)
                 except Exception as e:
@@ -1788,8 +1824,8 @@ class PlaywrightMonitor:
             duration = time.time() - shop_start
             self.log(f"[P{page_id}] ✓ {short_name}: 下架{len(off_sale)} 售罄{len(sold_out)} ({duration:.1f}秒)")
             
-            # 发送通知（包含耗时信息）
-            if send_notification_callback and (off_sale or sold_out):
+            # 发送通知（始终发送，包括0商品时的正常状态通知）
+            if send_notification_callback:
                 try:
                     send_notification_callback(shop, off_sale, sold_out, shop_status, duration)
                 except Exception as e:
@@ -1900,8 +1936,18 @@ class PlaywrightMonitor:
                 goods_url = f"{base_url}/app/shop/{shop_id}/food#app.shop.food?path=management"
                 
                 self.log(f"   正在导航到商品管理页面...")
-                # 使用load而非networkidle，避免超时
-                await main_page.goto(goods_url, wait_until='load', timeout=60000)
+                # 使用load而非networkidle，避免超时（增加超时时间到90秒）
+                # 如果导航失败，重试一次
+                for nav_attempt in range(2):
+                    try:
+                        await main_page.goto(goods_url, wait_until='load', timeout=90000)
+                        break  # 成功则跳出循环
+                    except Exception as nav_err:
+                        if nav_attempt == 0:
+                            self.log(f"   ⚠ 导航超时，重试中...")
+                            await asyncio.sleep(3)
+                        else:
+                            raise nav_err  # 第二次也失败则抛出异常
                 await asyncio.sleep(5)  # 等待页面JS渲染
                 
                 # 检查登录状态
@@ -1934,11 +1980,17 @@ class PlaywrightMonitor:
                 for i in range(1, num_workers):
                     try:
                         new_page = await self.context.new_page()
-                        await new_page.goto(goods_url, wait_until='load', timeout=60000)
+                        # 增加超时时间到90秒（网络慢时需要更长时间）
+                        await new_page.goto(goods_url, wait_until='load', timeout=90000)
                         await asyncio.sleep(2)
                         worker_pages.append(new_page)
                     except Exception as e:
                         self.log(f"   ⚠ 创建页面 {i} 失败: {e}")
+                        # 如果创建失败，尝试关闭这个页面避免资源泄漏
+                        try:
+                            await new_page.close()
+                        except:
+                            pass
                 
                 self.log(f"   ✓ 已创建 {len(worker_pages)} 个并行页面")
                 

@@ -356,8 +356,8 @@ class ParallelMonitor:
                     shop_status=shop_status,
                 ))
                 
-                # 发送通知
-                if send_notification_callback and (off_sale_list or sold_out_list):
+                # 发送通知（始终发送，包括0商品时的正常状态通知）
+                if send_notification_callback:
                     try:
                         send_notification_callback(shop, off_sale_list, sold_out_list, shop_status)
                     except Exception as e:

@@ -374,8 +374,9 @@ class MonitorWorker(QThread):
             )
             
             # 定义发送通知的回调（包含耗时参数）
+            # 始终发送通知，包括0商品时的正常状态鼓励消息
             def send_notification(shop, off_sale, sold_out, shop_status, duration=0):
-                if shop.webhook and (off_sale or sold_out):
+                if shop.webhook:
                     self._send_shop_notification(shop, off_sale, sold_out, shop_status, duration)
             
             # 运行并行监控

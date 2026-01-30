@@ -2026,11 +2026,25 @@ class SeleniumGoodsFetcher:
         duration_str = f"{int(duration)}秒" if duration > 0 else ""
         
         if total == 0:
+            # 根据营业状态选择不同的鼓励语
+            if shop_status == "营业中":
+                encouragements = [
+                    "🎉 太棒了！所有商品都已正常上架，继续保持！",
+                    "👏 干得漂亮！商品管理做得真好，给你点赞！",
+                    "💪 完美状态！店铺运营井井有条，继续加油！",
+                    "🌟 非常优秀！商品全部在线，今天一定大卖！",
+                    "✨ 状态满分！商品齐全待客来，祝生意兴隆！",
+                ]
+                import random
+                encourage_msg = random.choice(encouragements)
+            else:
+                encourage_msg = f"📋 门店当前{shop_status}，商品状态正常"
+            
             content = f"### ✅ 商品状态正常\n" \
-                      f"> 门店：{shop_name}\n" \
+                      f"> 门店：<font color=\"info\">{shop_name}</font>\n" \
                       f"> 状态：<font color=\"{status_color}\">{shop_status}</font>\n" \
                       f"> 时间：{now}\n\n" \
-                      f"无异常商品，一切正常 👍"
+                      f"{encourage_msg}"
             return {
                 "msgtype": "markdown",
                 "markdown": {"content": content}
