@@ -31,7 +31,8 @@ chromium_profile/
 # PyInstaller
 build/
 *.spec
-# dist/ 目录保留，用于存放编译产物
+# dist/ 目录下的 exe 通过 GitHub Releases 发布，不提交到 git
+dist/*.exe
 
 # Cookies
 cookies_*.pkl
