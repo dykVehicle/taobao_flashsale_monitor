@@ -712,6 +712,7 @@ class SeleniumGoodsFetcher:
         """执行门店切换的内部方法"""
         from selenium.webdriver.common.by import By
         from selenium.webdriver.common.keys import Keys
+        from selenium.webdriver.common.action_chains import ActionChains
         
         result = {
             'success': False,
@@ -2026,7 +2027,7 @@ class SeleniumGoodsFetcher:
         duration_str = f"{int(duration)}秒" if duration > 0 else ""
         
         if total == 0:
-q            # 根据营业状态选择不同的鼓励语
+            # 根据营业状态选择不同的鼓励语
             if shop_status == "营业中":
                 encouragements = [
                     "🎉 太棒了！所有商品都已正常上架，继续保持！",

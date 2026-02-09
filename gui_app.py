@@ -376,8 +376,10 @@ class MonitorWorker(QThread):
             # 定义发送通知的回调（包含耗时参数）
             # 始终发送通知，包括0商品时的正常状态鼓励消息
             def send_notification(shop, off_sale, sold_out, shop_status, duration=0):
-                if shop.webhook:
-                    self._send_shop_notification(shop, off_sale, sold_out, shop_status, duration)
+                # 通知发送（企业微信 + WeChat）由 _send_shop_notification 内部判断：
+                # - 企业微信：有 shop.webhook 才发送
+                # - WeChat：由全局配置 enable_wechat_notification 决定
+                self._send_shop_notification(shop, off_sale, sold_out, shop_status, duration)
             
             # 运行并行监控
             all_results = self.pw_monitor.run_parallel_monitor(
@@ -503,8 +505,17 @@ class MonitorWorker(QThread):
                 
                 self.log(f"   ✓ 抓取完成: 下架 {len(off_sale)} 个, 售罄 {len(sold_out)} 个 (耗时 {shop_duration:.1f}秒)")
                 
-                if (len(off_sale) > 0 or len(sold_out) > 0) and shop.webhook:
-                    self._send_shop_notification(shop, off_sale, sold_out, shop_status)
+                # 发送通知：
+                # - 企业微信：仅异常且配置了门店 webhook 才发
+                # - WeChat：全局开关控制，可选“正常也发送”
+                has_abnormal = len(off_sale) > 0 or len(sold_out) > 0
+                should_send_wecom = has_abnormal and bool(shop.webhook)
+                should_send_wechat = (
+                    bool(getattr(self.config, 'enable_wechat_notification', False))
+                    and (bool(getattr(self.config, 'wechat_send_normal', False)) or has_abnormal)
+                )
+                if should_send_wecom or should_send_wechat:
+                    self._send_shop_notification(shop, off_sale, sold_out, shop_status, shop_duration, send_wecom=should_send_wecom)
                 
                 self.shop_result_signal.emit(shop_result)
                 
@@ -546,37 +557,81 @@ class MonitorWorker(QThread):
             self.status_signal.emit("完成")
             self.finished_signal.emit(result)
     
-    def _send_shop_notification(self, shop: ShopInfo, off_sale_list, sold_out_list, shop_status: str = "营业中", duration: float = 0):
-        """发送单店通知"""
+    def _send_shop_notification(
+        self,
+        shop: ShopInfo,
+        off_sale_list,
+        sold_out_list,
+        shop_status: str = "营业中",
+        duration: float = 0,
+        send_wecom: bool = True,
+    ):
+        """发送单店通知（企业微信 + WeChat）"""
         import requests
         from selenium_fetcher import SeleniumGoodsFetcher
+        from wechat_notifier import parse_targets, format_shop_message, send_to_targets
         
-        try:
-            # 生成消息（包含营业状态和耗时）
+        # 企业微信通知
+        if send_wecom and shop.webhook:
             try:
-                msg_body = SeleniumGoodsFetcher.format_wecom_markdown(
+                # 生成消息（包含营业状态和耗时）
+                try:
+                    msg_body = SeleniumGoodsFetcher.format_wecom_markdown(
+                        shop.name, off_sale_list, sold_out_list, shop_status, duration
+                    )
+                except:
+                    text_msg = SeleniumGoodsFetcher.format_wecom_message(
+                        shop.name, off_sale_list, sold_out_list, shop_status=shop_status
+                    )
+                    msg_body = {"msgtype": "text", "text": {"content": text_msg}}
+                
+                # 发送请求
+                resp = requests.post(shop.webhook, json=msg_body, timeout=10)
+                
+                if resp.status_code == 200:
+                    result = resp.json()
+                    if result.get("errcode") == 0:
+                        self.log(f"   📤 已发送企业微信通知到: {shop.name}")
+                    else:
+                        self.log(f"   ✗ 企业微信通知发送失败: {result.get('errmsg')}")
+                else:
+                    self.log(f"   ✗ 企业微信通知发送失败: HTTP {resp.status_code}")
+                    
+            except Exception as e:
+                self.log(f"   ✗ 发送企业微信通知出错: {e}")
+        
+        # WeChat通知（wxauto）
+        if self.config.enable_wechat_notification:
+            try:
+                targets = parse_targets(self.config.wechat_targets)
+                if not targets:
+                    return
+                
+                has_abnormal = len(off_sale_list) > 0 or len(sold_out_list) > 0
+                message = format_shop_message(
                     shop.name, off_sale_list, sold_out_list, shop_status, duration
                 )
-            except:
-                text_msg = SeleniumGoodsFetcher.format_wecom_message(
-                    shop.name, off_sale_list, sold_out_list, shop_status=shop_status
-                )
-                msg_body = {"msgtype": "text", "text": {"content": text_msg}}
-            
-            # 发送请求
-            resp = requests.post(shop.webhook, json=msg_body, timeout=10)
-            
-            if resp.status_code == 200:
-                result = resp.json()
-                if result.get("errcode") == 0:
-                    self.log(f"   📤 已发送通知到: {shop.name}")
-                else:
-                    self.log(f"   ✗ 通知发送失败: {result.get('errmsg')}")
-            else:
-                self.log(f"   ✗ 通知发送失败: HTTP {resp.status_code}")
                 
-        except Exception as e:
-            self.log(f"   ✗ 发送通知出错: {e}")
+                result = send_to_targets(
+                    targets, message,
+                    send_normal=self.config.wechat_send_normal,
+                    has_abnormal=has_abnormal
+                )
+                
+                if result['success_count'] > 0:
+                    self.log(f"   💬 WeChat通知已发送到 {result['success_count']} 个目标")
+                if result['failed_count'] > 0:
+                    self.log(f"   ✗ WeChat通知发送失败: {result['failed_count']} 个目标")
+                    if result.get('errors'):
+                        for err in result['errors']:
+                            self.log(f"      ✗ {err}")
+                    elif result['failed_targets']:
+                        self.log(f"      失败目标: {', '.join(result['failed_targets'])}")
+                        
+            except Exception as e:
+                import traceback
+                self.log(f"   ✗ 发送WeChat通知出错: {e}")
+                self.log(f"      {traceback.format_exc()}")
     
     def _try_auto_login(self):
         """尝试自动填充登录表单"""
@@ -1052,6 +1107,9 @@ class MainWindow(QMainWindow):
         tabs.addTab(login_tab, "🔐 登录")
         
         # --- 店铺配置Tab ---
+        shop_scroll = QScrollArea()
+        shop_scroll.setWidgetResizable(True)
+        shop_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         shop_tab = QWidget()
         shop_layout = QVBoxLayout(shop_tab)
         shop_layout.setContentsMargins(25, 25, 25, 25)
@@ -1132,8 +1190,45 @@ class MainWindow(QMainWindow):
         notify_form.addRow("", self.enable_notify_checkbox)
         
         shop_layout.addWidget(notify_group)
+        
+        # WeChat通知配置（使用wxauto）
+        wechat_group = QGroupBox("💬 WeChat通知设置（wxauto）")
+        wechat_form = QFormLayout(wechat_group)
+        wechat_form.setSpacing(15)
+        wechat_form.setContentsMargins(20, 20, 20, 15)
+        
+        self.enable_wechat_checkbox = QCheckBox("启用WeChat通知")
+        wechat_form.addRow("", self.enable_wechat_checkbox)
+        
+        self.wechat_targets_input = QTextEdit()
+        self.wechat_targets_input.setPlaceholderText("输入WeChat目标（个人或群组名称）\n每行一个，例如：\n张三\n工作群\n测试群")
+        self.wechat_targets_input.setMaximumHeight(100)
+        wechat_form.addRow("目标列表:", self.wechat_targets_input)
+        
+        self.wechat_send_normal_checkbox = QCheckBox("发送正常状态消息")
+        wechat_form.addRow("", self.wechat_send_normal_checkbox)
+        
+        # WeChat说明
+        wechat_note = QLabel(
+            "💡 提示: WeChat通知使用wxauto实现Windows桌面微信自动化。\n"
+            "需要：1) Windows系统 2) 已安装微信PC版 3) 微信已登录\n"
+            "目标名称需与微信中的联系人/群组名称完全一致。"
+        )
+        wechat_note.setStyleSheet("""
+            color: #7f8fa6; 
+            font-size: 11px; 
+            padding: 10px; 
+            background-color: #f5f6fa; 
+            border-radius: 6px;
+            border: 1px solid #dcdde1;
+        """)
+        wechat_note.setWordWrap(True)
+        wechat_form.addRow("", wechat_note)
+        
+        shop_layout.addWidget(wechat_group)
         shop_layout.addStretch()
-        tabs.addTab(shop_tab, "🏪 店铺")
+        shop_scroll.setWidget(shop_tab)
+        tabs.addTab(shop_scroll, "🏪 店铺")
         
         # --- 高级设置Tab ---
         advanced_tab = QWidget()
@@ -1365,6 +1460,11 @@ class MainWindow(QMainWindow):
         self.webhook_input.setText(self.config.wecom_webhook)
         self.enable_notify_checkbox.setChecked(self.config.enable_notification)
         
+        # 加载WeChat通知配置
+        self.enable_wechat_checkbox.setChecked(getattr(self.config, 'enable_wechat_notification', False))
+        self.wechat_targets_input.setPlainText(getattr(self.config, 'wechat_targets', ''))
+        self.wechat_send_normal_checkbox.setChecked(getattr(self.config, 'wechat_send_normal', False))
+        
         self.debug_port_spin.setValue(self.config.debug_port)
         self.browser_path_input.setText(self.config.browser_path)
         self.headless_checkbox.setChecked(self.config.headless)
@@ -1400,6 +1500,11 @@ class MainWindow(QMainWindow):
         
         self.config.wecom_webhook = self.webhook_input.text().strip()
         self.config.enable_notification = self.enable_notify_checkbox.isChecked()
+        
+        # 保存WeChat通知配置
+        self.config.enable_wechat_notification = self.enable_wechat_checkbox.isChecked()
+        self.config.wechat_targets = self.wechat_targets_input.toPlainText().strip()
+        self.config.wechat_send_normal = self.wechat_send_normal_checkbox.isChecked()
         
         self.config.debug_port = self.debug_port_spin.value()
         self.config.browser_path = self.browser_path_input.text().strip()
@@ -1519,9 +1624,13 @@ class MainWindow(QMainWindow):
             self.sold_out_label.setText(f"已售罄: {total_sold_out}")
             self.total_label.setText(f"门店: {shops_monitored}/{shops_monitored + shops_skipped}")
             
-            # 发送监控总结到默认 webhook（单店模式使用的 webhook）
+            # 发送监控总结到默认 webhook（单店模式使用的 webhook）和WeChat
             if self.config.enable_notification and self.config.wecom_webhook:
                 self._send_multi_shop_summary(all_results)
+            
+            # WeChat通知（多门店总结）
+            if self.config.enable_wechat_notification:
+                self._send_wechat_multi_shop_summary(all_results)
             
             self.log("")
             self.log("=" * 50)
@@ -1548,11 +1657,22 @@ class MainWindow(QMainWindow):
             self.preview_wecom_message(off_sale_list, sold_out_list)
             self.log("")
         
-        # 如果启用了通知，发送企业微信消息
-        if (off_sale > 0 or sold_out > 0) and self.config.enable_notification and self.config.wecom_webhook:
-            self.send_wecom_notification(off_sale_list, sold_out_list)
-        elif off_sale == 0 and sold_out == 0:
-            self.log("✅ 商品状态正常，无异常商品")
+        # 发送通知（企业微信 + WeChat）
+        has_abnormal = off_sale > 0 or sold_out > 0
+        wecom_enabled = bool(self.config.enable_notification and self.config.wecom_webhook)
+        wechat_enabled = bool(getattr(self.config, 'enable_wechat_notification', False))
+        wechat_send_normal = bool(getattr(self.config, 'wechat_send_normal', False))
+
+        if has_abnormal:
+            # 异常：任一通知渠道启用即可发送（send_wecom_notification 内部会分别判断）
+            if wecom_enabled or wechat_enabled:
+                self.send_wecom_notification(off_sale_list, sold_out_list)
+        else:
+            # 正常：仅当开启了“正常也发送”的 WeChat 通知时才推送
+            if wechat_enabled and wechat_send_normal:
+                self.send_wecom_notification(off_sale_list, sold_out_list)
+            else:
+                self.log("✅ 商品状态正常，无异常商品")
         
         self.log("=" * 50)
         self.statusBar().showMessage("监控完成")
@@ -1597,43 +1717,79 @@ class MainWindow(QMainWindow):
         self.log("💡 请及时处理")
     
     def send_wecom_notification(self, off_sale_list, sold_out_list):
-        """发送企业微信通知"""
+        """发送企业微信通知 + WeChat通知"""
         import requests
         from selenium_fetcher import SeleniumGoodsFetcher
+        from wechat_notifier import parse_targets, format_shop_message, send_to_targets
         
-        try:
-            shop_name = self.config.shop_name or "未设置门店名"
-            
-            # 生成精美消息（尝试 Markdown，如果失败则用文本）
+        shop_name = self.config.shop_name or "未设置门店名"
+        has_abnormal = len(off_sale_list) > 0 or len(sold_out_list) > 0
+        
+        # 企业微信通知
+        if self.config.enable_notification and self.config.wecom_webhook:
             try:
-                msg_body = SeleniumGoodsFetcher.format_wecom_markdown(
-                    shop_name, off_sale_list, sold_out_list
-                )
-            except:
-                # 降级为纯文本
-                text_msg = SeleniumGoodsFetcher.format_wecom_message(
-                    shop_name, off_sale_list, sold_out_list
-                )
-                msg_body = {"msgtype": "text", "text": {"content": text_msg}}
-            
-            # 发送请求
-            resp = requests.post(
-                self.config.wecom_webhook,
-                json=msg_body,
-                timeout=10
-            )
-            
-            if resp.status_code == 200:
-                result = resp.json()
-                if result.get("errcode") == 0:
-                    self.log("✓ 企业微信通知发送成功！")
-                else:
-                    self.log(f"✗ 企业微信通知发送失败: {result.get('errmsg')}")
-            else:
-                self.log(f"✗ 企业微信通知发送失败: HTTP {resp.status_code}")
+                # 生成精美消息（尝试 Markdown，如果失败则用文本）
+                try:
+                    msg_body = SeleniumGoodsFetcher.format_wecom_markdown(
+                        shop_name, off_sale_list, sold_out_list
+                    )
+                except:
+                    # 降级为纯文本
+                    text_msg = SeleniumGoodsFetcher.format_wecom_message(
+                        shop_name, off_sale_list, sold_out_list
+                    )
+                    msg_body = {"msgtype": "text", "text": {"content": text_msg}}
                 
-        except Exception as e:
-            self.log(f"✗ 发送企业微信通知出错: {e}")
+                # 发送请求
+                resp = requests.post(
+                    self.config.wecom_webhook,
+                    json=msg_body,
+                    timeout=10
+                )
+                
+                if resp.status_code == 200:
+                    result = resp.json()
+                    if result.get("errcode") == 0:
+                        self.log("✓ 企业微信通知发送成功！")
+                    else:
+                        self.log(f"✗ 企业微信通知发送失败: {result.get('errmsg')}")
+                else:
+                    self.log(f"✗ 企业微信通知发送失败: HTTP {resp.status_code}")
+                    
+            except Exception as e:
+                self.log(f"✗ 发送企业微信通知出错: {e}")
+        
+        # WeChat通知（wxauto）
+        if self.config.enable_wechat_notification:
+            try:
+                targets = parse_targets(self.config.wechat_targets)
+                if not targets:
+                    return
+                
+                message = format_shop_message(
+                    shop_name, off_sale_list, sold_out_list
+                )
+                
+                result = send_to_targets(
+                    targets, message,
+                    send_normal=self.config.wechat_send_normal,
+                    has_abnormal=has_abnormal
+                )
+                
+                if result['success_count'] > 0:
+                    self.log(f"✓ WeChat通知已发送到 {result['success_count']} 个目标")
+                if result['failed_count'] > 0:
+                    self.log(f"✗ WeChat通知发送失败: {result['failed_count']} 个目标")
+                    if result.get('errors'):
+                        for err in result['errors']:
+                            self.log(f"   ✗ {err}")
+                    elif result['failed_targets']:
+                        self.log(f"   失败目标: {', '.join(result['failed_targets'])}")
+                        
+            except Exception as e:
+                import traceback
+                self.log(f"✗ 发送WeChat通知出错: {e}")
+                self.log(f"   {traceback.format_exc()}")
     
     def _simplify_skip_reason(self, reason: str) -> str:
         """简化跳过原因，避免显示完整错误信息"""
@@ -1775,6 +1931,89 @@ class MainWindow(QMainWindow):
                 
         except Exception as e:
             self.log(f"✗ 发送监控总结出错: {e}")
+    
+    def _send_wechat_multi_shop_summary(self, all_results: dict):
+        """发送多门店监控总结到WeChat"""
+        from wechat_notifier import parse_targets, send_to_targets
+        from datetime import datetime
+        
+        try:
+            targets = parse_targets(self.config.wechat_targets)
+            if not targets:
+                return
+            
+            now = datetime.now().strftime("%m-%d %H:%M")
+            shops_monitored = all_results.get('shops_monitored', 0)
+            shops_skipped = all_results.get('shops_skipped', 0)
+            total_off_sale = all_results.get('total_off_sale', 0)
+            total_sold_out = all_results.get('total_sold_out', 0)
+            total_duration = all_results.get('total_duration', 0)
+            shop_results = all_results.get('shop_results', [])
+            
+            total_shops = shops_monitored + shops_skipped
+            
+            # 格式化总耗时
+            if total_duration >= 60:
+                duration_str = f"{int(total_duration // 60)}分{int(total_duration % 60)}秒"
+            else:
+                duration_str = f"{total_duration:.0f}秒"
+            
+            # 构建消息
+            lines = []
+            lines.append(f"📊 【多门店监控总结】")
+            lines.append(f"⏰ {now}")
+            lines.append(f"⏱ 耗时: {duration_str}")
+            lines.append(f"🏪 门店: {shops_monitored}/{total_shops}")
+            lines.append("")
+            lines.append(f"✅ 成功监控: {shops_monitored} 个门店")
+            lines.append(f"⏸ 跳过: {shops_skipped} 个门店")
+            lines.append(f"🔻 总下架: {total_off_sale} 个商品")
+            lines.append(f"🔴 总售罄: {total_sold_out} 个商品")
+            lines.append("")
+            
+            # 成功监控的门店（最多显示10个）
+            if shop_results:
+                lines.append("✅ 成功监控的门店:")
+                for sr in shop_results[:10]:
+                    off_count = len(sr.get('off_sale', []))
+                    sold_count = len(sr.get('sold_out', []))
+                    shop_status = sr.get('shop_status', '营业中')
+                    short_name = sr.get('short_name', '')
+                    if not short_name:
+                        shop = sr.get('shop')
+                        shop_name = shop.name if shop else sr.get('shop_name', '未知')
+                        short_name = simplify_shop_name(shop_name)
+                    status_text = "[营业]" if shop_status == "营业中" else f"[{shop_status}]"
+                    lines.append(f"  • {short_name} {status_text}: 下架{off_count}/售罄{sold_count}")
+                if len(shop_results) > 10:
+                    lines.append(f"  ... 等{len(shop_results)}个门店")
+            
+            lines.append("")
+            lines.append("💡 详情请查看各门店通知")
+            
+            message = "\n".join(lines)
+            
+            # 发送到WeChat
+            result = send_to_targets(
+                targets, message,
+                send_normal=self.config.wechat_send_normal,
+                has_abnormal=(total_off_sale > 0 or total_sold_out > 0)
+            )
+            
+            if result['success_count'] > 0:
+                self.log(f"✓ WeChat多门店总结已发送到 {result['success_count']} 个目标")
+            if result['failed_count'] > 0:
+                self.log(f"✗ WeChat多门店总结发送失败: {result['failed_count']} 个目标")
+                if result.get('errors'):
+                    for err in result['errors']:
+                        self.log(f"   ✗ {err}")
+                elif result['failed_targets']:
+                    self.log(f"   失败目标: {', '.join(result['failed_targets'])}")
+                    
+        except Exception as e:
+            import traceback
+            self.log(f"✗ 发送WeChat多门店总结出错: {e}")
+            self.log(f"   {traceback.format_exc()}")
     
     def on_monitor_error(self, error: str):
         """监控出错"""

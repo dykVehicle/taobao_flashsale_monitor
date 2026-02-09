@@ -11,5 +11,8 @@ playwright>=1.40.0
 PyQt6>=6.4.0
 cryptography>=3.4.0
 
+# WeChat通知依赖（Windows桌面微信自动化）
+wxauto>=3.9.0
+
 # 打包依赖（仅打包时需要）
 # pyinstaller>=5.0

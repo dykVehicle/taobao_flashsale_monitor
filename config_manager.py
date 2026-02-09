@@ -56,6 +56,11 @@ class AppConfig:
     wecom_webhook: str = ""
     enable_notification: bool = False
     
+    # WeChat通知配置（使用wxauto）
+    enable_wechat_notification: bool = False
+    wechat_targets: str = ""  # 多行文本，每行一个目标（个人或群组名称）
+    wechat_send_normal: bool = False  # 是否发送正常状态消息
+    
     # 监控设置
     check_interval: int = 30  # 分钟
     export_dir: str = "./exports"

@@ -83,6 +83,7 @@ cp "$SCRIPT_DIR/selenium_fetcher.py" "$WIN_BUILD_DIR/"
 cp "$SCRIPT_DIR/shop_manager.py" "$WIN_BUILD_DIR/"
 cp "$SCRIPT_DIR/parallel_monitor.py" "$WIN_BUILD_DIR/"
 cp "$SCRIPT_DIR/playwright_monitor.py" "$WIN_BUILD_DIR/"
+cp "$SCRIPT_DIR/wechat_notifier.py" "$WIN_BUILD_DIR/"
 cp "$SCRIPT_DIR/version.py" "$WIN_BUILD_DIR/"
 cp "$SCRIPT_DIR/build_exe.py" "$WIN_BUILD_DIR/"
 cp "$SCRIPT_DIR/requirements.txt" "$WIN_BUILD_DIR/"
@@ -93,7 +94,7 @@ echo "  [OK] 文件复制完成"
 echo ""
 show_progress 3
 echo "[3/5] 安装Python依赖..."
-(cd /mnt/c && cmd.exe /c "$PYTHON_CMD -m pip install -q PyQt6 cryptography selenium openpyxl requests beautifulsoup4 lxml pyinstaller" 2>/dev/null)
+(cd /mnt/c && cmd.exe /c "chcp 65001 >nul && cd /d $WIN_BUILD_PATH && $PYTHON_CMD -m pip install -q -r requirements.txt pyinstaller" 2>/dev/null)
 echo "  [OK] 依赖安装完成"
 
 # Step 4: 打包
