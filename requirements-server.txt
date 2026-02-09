@@ -1,0 +1,20 @@
+# 服务端部署依赖（无GUI，无wxauto）
+# 适用于 Linux 云服务器
+
+# 核心依赖
+requests>=2.28.0
+beautifulsoup4>=4.11.0
+lxml>=4.9.0
+openpyxl>=3.0.10
+schedule>=1.1.0
+
+# 浏览器自动化（服务端仅使用Playwright）
+playwright>=1.40.0
+
+# 加密
+cryptography>=3.4.0
+
+# 注意：以下依赖在服务端不需要
+# PyQt6 - GUI界面（服务端无需）
+# selenium - 服务端使用Playwright替代
+# wxauto - Windows微信自动化（Linux不支持）

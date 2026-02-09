@@ -1,0 +1,61 @@
+# 淘宝闪购智能助手 - Docker Compose 部署配置
+#
+# 使用方法:
+#   首次登录:  docker compose run --rm monitor --login
+#   启动监控:  docker compose up -d
+#   查看日志:  docker compose logs -f
+#   停止监控:  docker compose down
+
+version: '3.8'
+
+services:
+  monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: taobao-monitor
+    restart: unless-stopped
+
+    # 环境变量（根据实际情况修改）
+    environment:
+      - HEADLESS=true
+      - TZ=Asia/Shanghai
+      # 通知配置（取消注释并填入实际值）
+      # - WECOM_WEBHOOK=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY
+      # - DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN
+      # - SERVERCHAN_KEY=YOUR_SENDKEY
+
+    # 数据卷（持久化登录状态和配置）
+    volumes:
+      - monitor-data:/app/data
+      - monitor-profile:/app/playwright_profile
+      - ./exports:/app/exports
+      - ./doc:/app/doc:ro
+      # 如果需要自定义配置，挂载配置目录
+      # - ~/.taobao_flashsale_monitor:/root/.taobao_flashsale_monitor
+
+    # 资源限制（根据服务器配置调整）
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+    # 日志配置
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # 默认命令参数
+    command: ["--interval", "30", "--workers", "5"]
+
+volumes:
+  monitor-data:
+    driver: local
+  monitor-profile:
+    driver: local

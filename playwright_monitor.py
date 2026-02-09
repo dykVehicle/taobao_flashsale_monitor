@@ -1914,10 +1914,22 @@ class PlaywrightMonitor:
                 user_data_dir = os.path.join(persistent_dir, 'playwright_profile')
                 
                 # 使用持久化上下文（保存登录状态）
+                # headless模式：从配置读取，服务端部署时设为True
+                use_headless = getattr(self.config, 'headless', False) if self.config else False
+                
+                launch_args = ['--disable-blink-features=AutomationControlled']
+                if use_headless:
+                    # 无头模式下的额外参数
+                    launch_args.extend([
+                        '--no-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-gpu',
+                    ])
+                
                 self.context = await p.chromium.launch_persistent_context(
                     user_data_dir,
-                    headless=False,
-                    args=['--disable-blink-features=AutomationControlled'],
+                    headless=use_headless,
+                    args=launch_args,
                     viewport={'width': 1280, 'height': 800},
                 )
                 self._cdp_connected = False
