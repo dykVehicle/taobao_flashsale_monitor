@@ -134,6 +134,117 @@ def send_serverchan(sendkey: str, title: str, message: str) -> bool:
         return False
 
 
+def send_pushplus(token: str, title: str, content: str) -> bool:
+    """发送PushPlus通知 (https://www.pushplus.plus/)"""
+    if not token:
+        return False
+    try:
+        url = "http://www.pushplus.plus/send"
+        payload = {"token": token, "title": title, "content": content, "template": "txt"}
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            result = resp.json()
+            if result.get("code") == 200:
+                logger.info("PushPlus通知发送成功")
+                return True
+            else:
+                logger.warning(f"PushPlus通知失败: {result}")
+                return False
+        else:
+            logger.warning(f"PushPlus通知HTTP错误: {resp.status_code}")
+            return False
+    except Exception as e:
+        logger.error(f"发送PushPlus通知失败: {e}")
+        return False
+
+
+_wecom_token_cache = {"token": "", "expires": 0}
+
+
+def _get_wecom_access_token(corpid: str, corpsecret: str) -> str:
+    """获取企业微信应用 access_token（带缓存）"""
+    if _wecom_token_cache["token"] and time.time() < _wecom_token_cache["expires"]:
+        return _wecom_token_cache["token"]
+    try:
+        url = f"https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={corpid}&corpsecret={corpsecret}"
+        resp = requests.get(url, timeout=10)
+        data = resp.json()
+        if data.get("errcode") == 0:
+            _wecom_token_cache["token"] = data["access_token"]
+            _wecom_token_cache["expires"] = time.time() + data.get("expires_in", 7200) - 300
+            return data["access_token"]
+        else:
+            logger.warning(f"获取企业微信token失败: {data}")
+            return ""
+    except Exception as e:
+        logger.error(f"获取企业微信token异常: {e}")
+        return ""
+
+
+def send_wecom_app_message(corpid: str, corpsecret: str, agentid: str, touser: str, content: str) -> bool:
+    """发送企业微信应用消息（推送到个人微信）"""
+    if not all([corpid, corpsecret, agentid]):
+        return False
+    try:
+        token = _get_wecom_access_token(corpid, corpsecret)
+        if not token:
+            return False
+        url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={token}"
+        payload = {
+            "touser": touser or "@all",
+            "msgtype": "text",
+            "agentid": int(agentid),
+            "text": {"content": content}
+        }
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            result = resp.json()
+            if result.get("errcode") == 0:
+                logger.info("企业微信应用消息发送成功")
+                return True
+            else:
+                logger.warning(f"企业微信应用消息失败: {result}")
+        return False
+    except Exception as e:
+        logger.error(f"发送企业微信应用消息失败: {e}")
+        return False
+
+
+def send_wechat_via_wcf(wcf_url: str, receivers: str, message: str) -> bool:
+    """通过 wxauto HTTP API 发送微信消息到个人或群
+
+    Args:
+        wcf_url: wxauto HTTP 服务地址，如 http://192.168.1.7:9999
+        receivers: 接收者列表，逗号分隔。直接使用微信昵称或群名
+        message: 消息内容
+    """
+    if not wcf_url or not receivers:
+        return False
+    wcf_url = wcf_url.rstrip('/')
+    success_count = 0
+    for receiver in receivers.split(','):
+        receiver = receiver.strip()
+        if not receiver:
+            continue
+        try:
+            resp = requests.post(f"{wcf_url}/api/sendText", json={
+                "who": receiver,
+                "msg": message,
+            }, timeout=15)
+            if resp.status_code == 200:
+                result = resp.json()
+                if result.get("code") == 0:
+                    logger.info(f"微信消息已发送到: {receiver}")
+                    success_count += 1
+                else:
+                    logger.warning(f"微信消息发送失败({receiver}): {result.get('msg')}")
+            else:
+                logger.warning(f"微信消息发送失败({receiver}): HTTP {resp.status_code}")
+        except Exception as e:
+            logger.error(f"发送微信消息失败({receiver}): {e}")
+    return success_count > 0
+
+
 # ========== 核心监控逻辑 ==========
 
 class ServerMonitor:
@@ -220,6 +331,88 @@ class ServerMonitor:
             title = f"商品异常: {shop.name}"
             send_serverchan(serverchan_key, title, message)
 
+        # PushPlus通知
+        pushplus_token = os.environ.get('PUSHPLUS_TOKEN')
+        if pushplus_token and (has_abnormal or self.config.wechat_send_normal):
+            title = f"商品异常: {shop.name}" if has_abnormal else f"商品正常: {shop.name}"
+            send_pushplus(pushplus_token, title, message)
+
+        # 企业微信应用消息（推送到个人微信）
+        wecom_corpid = os.environ.get('WECOM_CORPID')
+        wecom_corpsecret = os.environ.get('WECOM_CORPSECRET')
+        wecom_agentid = os.environ.get('WECOM_AGENTID')
+        wecom_touser = os.environ.get('WECOM_TOUSER', '@all')
+        if all([wecom_corpid, wecom_corpsecret, wecom_agentid]) and (has_abnormal or self.config.wechat_send_normal):
+            send_wecom_app_message(wecom_corpid, wecom_corpsecret, wecom_agentid, wecom_touser, message)
+
+        # wxauto 微信消息（始终发送每个门店的结果）
+        wcf_url = os.environ.get('WCF_URL')
+        wcf_receivers = os.environ.get('WCF_RECEIVERS')
+        if wcf_url and wcf_receivers:
+            send_wechat_via_wcf(wcf_url, wcf_receivers, message)
+
+    def _send_summary_notification(self, results: dict, duration_str: str):
+        """发送汇总监控结果通知"""
+        from datetime import datetime
+        now = datetime.now().strftime("%m-%d %H:%M")
+
+        monitored = results.get('shops_monitored', 0)
+        skipped = results.get('shops_skipped', 0)
+        total_off = results.get('total_off_sale', 0)
+        total_sold = results.get('total_sold_out', 0)
+        total_abnormal = total_off + total_sold
+        shop_results = results.get('shop_results', [])
+        skipped_shops = results.get('skipped_shops', [])
+
+        lines = []
+        if total_abnormal == 0 and skipped == 0:
+            lines.append("✅ 【监控汇总】全部正常")
+        elif total_abnormal > 0:
+            lines.append("🔔 【监控汇总】发现异常")
+        else:
+            lines.append("📋 【监控汇总】")
+
+        lines.append(f"⏰ {now}  耗时 {duration_str}")
+        lines.append(f"📊 监控 {monitored} 家 | 跳过 {skipped} 家")
+        if total_abnormal > 0:
+            lines.append(f"⚠️ 下架 {total_off} | 售罄 {total_sold}")
+        lines.append("")
+
+        abnormal_shops = [r for r in shop_results if r.get('off_sale') or r.get('sold_out')]
+        normal_shops = [r for r in shop_results if not r.get('off_sale') and not r.get('sold_out')]
+
+        if abnormal_shops:
+            lines.append("── 异常门店 ──")
+            for r in abnormal_shops:
+                name = r.get('short_name') or r.get('shop_name', '')
+                off = len(r.get('off_sale') or [])
+                sold = len(r.get('sold_out') or [])
+                parts = []
+                if off: parts.append(f"下架{off}")
+                if sold: parts.append(f"售罄{sold}")
+                lines.append(f"  ❌ {name}: {', '.join(parts)}")
+            lines.append("")
+
+        if normal_shops:
+            names = [r.get('short_name') or r.get('shop_name', '') for r in normal_shops]
+            lines.append(f"── 正常门店({len(names)}家) ──")
+            lines.append(f"  ✅ {', '.join(names)}")
+            lines.append("")
+
+        if skipped_shops:
+            lines.append("── 跳过门店 ──")
+            for s in skipped_shops:
+                name = s.get('short_name') or s.get('name', '')
+                reason = s.get('reason', '未知')
+                lines.append(f"  ⏭ {name}: {reason}")
+
+        summary_msg = "\n".join(lines)
+
+        wcf_url = os.environ.get('WCF_URL')
+        wcf_receivers = os.environ.get('WCF_RECEIVERS')
+        if wcf_url and wcf_receivers:
+            send_wechat_via_wcf(wcf_url, wcf_receivers, summary_msg)
+
     def _load_shops(self) -> List[ShopInfo]:
         """加载门店列表"""
         shop_file = self.config.shop_list_file
@@ -285,6 +478,8 @@ class ServerMonitor:
         self.log(f"  下架: {results.get('total_off_sale', 0)} 个商品")
         self.log(f"  售罄: {results.get('total_sold_out', 0)} 个商品")
         self.log(f"{'=' * 50}")
+
+        self._send_summary_notification(results, duration_str)
 
         return results
 

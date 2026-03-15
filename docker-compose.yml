@@ -24,6 +24,13 @@ services:
       # - WECOM_WEBHOOK=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY
       # - DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN
       # - SERVERCHAN_KEY=YOUR_SENDKEY
+      # - PUSHPLUS_TOKEN=YOUR_TOKEN
+      # - WECOM_CORPID=YOUR_CORP_ID
+      # - WECOM_CORPSECRET=YOUR_APP_SECRET
+      # - WECOM_AGENTID=YOUR_AGENT_ID
+      # - WECOM_TOUSER=@all
+      # - WCF_URL=http://192.168.1.7:9999
+      # - WCF_RECEIVERS=wxid_xxx,xxx@chatroom
 
     # 数据卷（持久化登录状态和配置）
     volumes:

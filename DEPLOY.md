@@ -291,6 +291,32 @@ sudo systemctl stop taobao-monitor
 3. 获取 SendKey
 4. 设置环境变量 `SERVERCHAN_KEY`
 
+### PushPlus（推送到微信，免费额度更多）
+
+1. 访问 [https://www.pushplus.plus/](https://www.pushplus.plus/)
+2. 用微信扫码登录
+3. 获取 Token
+4. 设置环境变量 `PUSHPLUS_TOKEN`
+
+免费版每天 200 条，支持多人/群组推送。消息通过微信公众号「pushplus推送加」推送。
+
+### 企业微信应用消息（推送到个人微信通知栏）
+
+与 Webhook 不同，应用消息直接推送到关注了企业微信的**个人微信**上（手机通知栏原生推送）。
+
+1. 登录 [企业微信管理后台](https://work.weixin.qq.com/)（个人可免费注册）
+2. 创建自建应用，获取 `AgentId`
+3. 在企业信息中获取 `CorpId`
+4. 在应用详情中获取 `Secret`
+5. 设置环境变量：
+
+```bash
+export WECOM_CORPID=your_corp_id
+export WECOM_CORPSECRET=your_app_secret
+export WECOM_AGENTID=your_agent_id
+export WECOM_TOUSER=@all          # 或指定用户ID，多个用|分隔
+```
+
 ### Bark（推送到iPhone）
 
 如需 Bark 推送，可以在 `server_monitor.py` 中添加：
@@ -299,6 +325,29 @@ sudo systemctl stop taobao-monitor
 def send_bark(bark_url: str, title: str, message: str) -> bool:
     resp = requests.get(f"{bark_url}/{title}/{message}")
     return resp.status_code == 200
+```
+
+---
+
+## 通知测试工具
+
+项目提供了 `test_notifications.py` 脚本，用于验证通知渠道配置是否正确：
+
+```bash
+# 测试所有已配置渠道的连通性
+python test_notifications.py --test-channel
+
+# 测试指定渠道
+python test_notifications.py --test-channel pushplus
+python test_notifications.py --test-channel wecom-app
+python test_notifications.py --test-channel serverchan
+python test_notifications.py --test-channel wecom-webhook --webhook <URL>
+
+# 模拟异常门店数据推送（触发所有通知渠道）
+python test_notifications.py --test-mock abnormal
+
+# 模拟正常门店数据推送
+python test_notifications.py --test-mock normal
 ```
 
 ---

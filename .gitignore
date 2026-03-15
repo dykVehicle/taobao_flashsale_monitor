@@ -34,8 +34,13 @@ build/
 # dist/ 目录下的 exe 通过 GitHub Releases 发布，不提交到 git
 dist/*.exe
 
-# Cookies
+# Cookies & login state
 cookies_*.pkl
+cookies/
+playwright_profile/
+
+# Systemd service (contains real tokens)
+taobao-monitor.service
 
 # Archive (unused files)
 _archive/
