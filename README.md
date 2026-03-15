@@ -56,10 +56,10 @@ python build_exe.py
 
 ```bash
 # 进入项目目录并运行编译脚本
-cd /home/dyk/Cursor/OneManCompany/taobao_flashsale_monitor && bash build_from_wsl.sh
+cd /home/dyk/ws/OnePersonCompany/taobao_flashsale_monitor && bash build_from_wsl.sh
 
 # 或者分步执行：
-cd /home/dyk/Cursor/OneManCompany/taobao_flashsale_monitor
+cd /home/dyk/ws/OnePersonCompany/taobao_flashsale_monitor
 bash build_from_wsl.sh
 ```
 

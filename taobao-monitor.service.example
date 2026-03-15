@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 User=dyk
-WorkingDirectory=/home/dyk/ws/OneManCompany/taobao_flashsale_monitor
+WorkingDirectory=/home/dyk/ws/OnePersonCompany/taobao_flashsale_monitor
 Environment=HEADLESS=true
 # 通知配置（取消注释并填入实际值）
 # Environment=SERVERCHAN_KEY=xxx
@@ -17,7 +17,7 @@ Environment=HEADLESS=true
 # wxauto 微信消息（Windows 机器运行 wxauto HTTP API）
 # Environment=WCF_URL=http://192.168.1.7:9999
 # Environment=WCF_RECEIVERS=联系人昵称或群名
-ExecStart=/home/dyk/ws/OneManCompany/taobao_flashsale_monitor/venv/bin/python server_monitor.py --interval 30 --workers 5 --shop-list doc/门店列表_v2.xlsx
+ExecStart=/home/dyk/ws/OnePersonCompany/taobao_flashsale_monitor/venv/bin/python server_monitor.py --interval 30 --workers 5 --shop-list doc/门店列表_v2.xlsx
 Restart=always
 RestartSec=60
 
